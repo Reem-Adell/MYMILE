@@ -1,263 +1,342 @@
+"""
+Channel3 product search (official API: https://channel3.ai/docs).
+
+    POST {CHANNEL3_BASE_URL}/v1/search          (base: https://api.trychannel3.com)
+    header  x-api-key: <CHANNEL3_API_KEY>
+    body    {"query": str, "limit": int (max 30), "config": {"currency": "USD", "country": "US"}}
+    200 ->  {"products": [Product], "next_page_token": str | null}
+
+A Product has id, title, description, brands[{id, name}], images[{url, is_main_image}],
+category{title}, ratings{value, count}, variants{options[{name, values[{label, available}]}]}
+and offers[{url, domain, price{price, compare_at_price, currency}, availability}].
+There is no top-level price or link: those come from the offers.
+
+Errors: 401 invalid/missing key, 402 credits used up, 422 invalid request,
+429 rate limited (Retry-After), 5xx/504 service errors; body {"detail": ...}.
+
+Rules:
+  * Only data Channel3 returned is used. Missing fields stay None; nothing is invented.
+  * Every search costs a credit: results are cached (CHANNEL3_CACHE_TTL_HOURS), identical
+    searches in flight share one request, and limits are strict.
+  * Failures raise Channel3Error with a fixed, key-free message. A failed refresh falls back
+    to the last cached result. There is no fake catalog.
+  * Purchase links are Premium-only (apply_purchase_link_policy), decided server-side.
+"""
+import asyncio
+import json
+import logging
+import time
+from contextlib import closing
+from typing import Any, Dict, List, Optional
+from urllib.parse import urlparse
+
 import httpx
-from typing import List, Optional
-from app.schemas.product_schema import ProductItem, ProductSearchResponse
+
+from app.core import database
 from app.core.config import settings
+from app.schemas.product_schema import ProductItem, ProductOffer, ProductSearchResponse
 
-# Curated, authentic real-world travel essentials with legitimate product names, verified prices, and real purchase links
-AUTHENTIC_CATALOG = [
-    # Universal Essentials
-    ProductItem(
-        id="c3-uni-01",
-        name="Epicka Universal Travel Adapter (All-in-One GaN)",
-        price=28.99,
-        currency="USD",
-        image_url="https://images.unsplash.com/photo-1558494949-ef010cbdcc31?auto=format&fit=crop&w=600&q=80",
-        description="Works in 150+ countries (US, UK, EU, AU). 4 USB ports, 1 Type-C and 1 AC socket for high-speed device charging.",
-        category="Tech",
-        rating=4.9,
-        purchase_url="https://www.amazon.com/dp/B078S3M2NX",
-        brand="Epicka",
-        reason="Crucial international adapter to keep smartphones, cameras, and laptops powered in all hotel sockets.",
-        in_stock=True,
-        provider="Channel3 Verified Catalog"
-    ),
-    ProductItem(
-        id="c3-uni-02",
-        name="Peak Design Everyday Travel Sling 6L",
-        price=54.95,
-        currency="USD",
-        image_url="https://images.unsplash.com/photo-1553062407-98eeb64c6a62?auto=format&fit=crop&w=600&q=80",
-        description="Weatherproof 400D nylon canvas shell with padded internal dividers and anti-theft zipper pull locks.",
-        category="Gear",
-        rating=4.8,
-        purchase_url="https://www.peakdesign.com/products/everyday-sling",
-        brand="Peak Design",
-        reason="Hands-free, secure storage for passport, wallet, power bank, and camera during day explorations.",
-        in_stock=True,
-        provider="Channel3 Verified Catalog"
-    ),
-    ProductItem(
-        id="c3-uni-03",
-        name="Hydro Flask 24 oz Standard Mouth Insulated Bottle",
-        price=32.00,
-        currency="USD",
-        image_url="https://images.unsplash.com/photo-1602143407151-7111542de6e8?auto=format&fit=crop&w=600&q=80",
-        description="Double-wall vacuum insulation keeps cold beverages iced up to 24 hours and hot drinks warm for 12 hours.",
-        category="Accessories",
-        rating=4.9,
-        purchase_url="https://www.hydroflask.com/24-oz-standard-mouth",
-        brand="Hydro Flask",
-        reason="Eco-friendly hydration for extensive city walking and sightseeing without buying single-use plastics.",
-        in_stock=True,
-        provider="Channel3 Verified Catalog"
-    ),
-    ProductItem(
-        id="c3-uni-04",
-        name="Bagail 6-Piece Compression Packing Cubes",
-        price=24.99,
-        currency="USD",
-        image_url="https://images.unsplash.com/photo-1551028719-00167b16eac5?auto=format&fit=crop&w=600&q=80",
-        description="Heavy-duty double zippers compress clothing by up to 60%, maximizing suitcase and backpack space.",
-        category="Gear",
-        rating=4.7,
-        purchase_url="https://www.amazon.com/dp/B07B4W3J56",
-        brand="Bagail",
-        reason="Keeps wardrobe organized and separates clean from worn outfits across multi-day journeys.",
-        in_stock=True,
-        provider="Channel3 Verified Catalog"
-    ),
-    # Kyoto / Tokyo / Rainy / Mild
-    ProductItem(
-        id="c3-rain-05",
-        name="Patagonia Torrentshell 3L Packable Rain Shell",
-        price=89.00,
-        currency="USD",
-        image_url="https://images.unsplash.com/photo-1544441893-675973e31985?auto=format&fit=crop&w=600&q=80",
-        description="H2No Performance Standard 3-layer waterproof/breathable fabric with DWR finish; packs into its own pocket.",
-        category="Clothing",
-        rating=4.9,
-        purchase_url="https://www.patagonia.com/product/mens-torrentshell-3l-rain-jacket",
-        brand="Patagonia",
-        reason="Protects against sudden spring showers in temples and gardens while remaining extremely lightweight.",
-        in_stock=True,
-        provider="Channel3 Verified Catalog"
-    ),
-    ProductItem(
-        id="c3-foot-06",
-        name="On Cloud 5 Lightweight Walking Shoes",
-        price=139.99,
-        currency="USD",
-        image_url="https://images.unsplash.com/photo-1542291026-7eec264c27ff?auto=format&fit=crop&w=600&q=80",
-        description="Engineered Zero-Gravity foam and CloudTec cushioning for all-day comfort during 20,000+ step sightseeing days.",
-        category="Footwear",
-        rating=4.8,
-        purchase_url="https://www.on.com/en-us/products/cloud-5",
-        brand="On Running",
-        reason="Essential for exploring cobblestone pathways, temple stairs, and extensive cultural walking routes.",
-        in_stock=True,
-        provider="Channel3 Verified Catalog"
-    ),
-    # Umrah / Religious Trip Essentials
-    ProductItem(
-        id="c3-umr-01",
-        name="Premium Microfiber 100% Cotton Ihram Towels (Set of 2)",
-        price=45.00,
-        currency="USD",
-        image_url="https://images.unsplash.com/photo-1584551246679-0daf3d275d0f?auto=format&fit=crop&w=600&q=80",
-        description="High-absorbency, breathable non-stitched white cotton fabric tailored specifically for Hajj and Umrah pilgrims.",
-        category="Religious/Umrah",
-        rating=4.9,
-        purchase_url="https://www.amazon.com/dp/B08V8R5X12",
-        brand="Al-Haram Essentials",
-        reason="Mandatory consecrated attire for male pilgrims performing Tawaf and Sa'i in comfort.",
-        in_stock=True,
-        provider="Channel3 Verified Catalog"
-    ),
-    ProductItem(
-        id="c3-umr-02",
-        name="Ergonomic Non-Slip Tawaf Barefoot Slippers",
-        price=24.50,
-        currency="USD",
-        image_url="https://images.unsplash.com/photo-1600185365483-26d7a4cc7519?auto=format&fit=crop&w=600&q=80",
-        description="Silicone-grip rubber soles with breathable mesh upper for hygienic protection on marble courtyard surfaces.",
-        category="Religious/Umrah",
-        rating=4.8,
-        purchase_url="https://www.amazon.com/dp/B09Z1X2Y3Z",
-        brand="PilgrimSole",
-        reason="Prevents slipping and protects feet during prolonged Tawaf rotations around the Kaaba.",
-        in_stock=True,
-        provider="Channel3 Verified Catalog"
-    ),
-    ProductItem(
-        id="c3-umr-03",
-        name="Halal Unscented Travel Hygiene & Toiletry Kit",
-        price=18.99,
-        currency="USD",
-        image_url="https://images.unsplash.com/photo-1556228720-195a672e8a03?auto=format&fit=crop&w=600&q=80",
-        description="100% fragrance-free soap, shampoo, and lip balm compliant with Ihram state prohibitions.",
-        category="Religious/Umrah",
-        rating=4.9,
-        purchase_url="https://www.amazon.com/dp/B07Y7K6D45",
-        brand="PureIhram",
-        reason="Complies strictly with religious Ihram guidelines barring scented perfumes or scented cosmetics.",
-        in_stock=True,
-        provider="Channel3 Verified Catalog"
-    ),
-    # Warm / Desert / Egypt / Cairo
-    ProductItem(
-        id="c3-des-01",
-        name="Columbia Bora Bora Booney Sun Protection Hat UPF 50+",
-        price=29.99,
-        currency="USD",
-        image_url="https://images.unsplash.com/photo-1521369909029-2afed882baee?auto=format&fit=crop&w=600&q=80",
-        description="Wide brim with Omni-Shade UPF 50 sun protection and mesh venting panel to keep head cool.",
-        category="Accessories",
-        rating=4.8,
-        purchase_url="https://www.columbia.com/p/bora-bora-booney-hat",
-        brand="Columbia",
-        reason="Vital protection under direct desert sun at Giza Pyramids and open-air monuments.",
-        in_stock=True,
-        provider="Channel3 Verified Catalog"
-    ),
-    ProductItem(
-        id="c3-des-02",
-        name="Osprey Daylite Plus Travel Backpack 20L",
-        price=75.00,
-        currency="USD",
-        image_url="https://images.unsplash.com/photo-1622560480605-d83c853bc5c3?auto=format&fit=crop&w=600&q=80",
-        description="Breathable die-cut foam backpanel, hydration sleeve, and dual water bottle mesh pockets.",
-        category="Gear",
-        rating=4.9,
-        purchase_url="https://www.osprey.com/daylite-plus",
-        brand="Osprey",
-        reason="Lightweight daypack to carry hydration, sunscreen, and camera while touring archaeological sites.",
-        in_stock=True,
-        provider="Channel3 Verified Catalog"
-    )
-]
+log = logging.getLogger(__name__)
 
-async def search_channel3_products(
-    destination: str,
-    trip_type: str = "Tourism",
-    season: str = "Spring",
-    limit: int = 6
-) -> ProductSearchResponse:
+DEFAULT_BASE_URL = "https://api.trychannel3.com"
+# Earlier, undocumented guesses. Requests to them can't work, so they're replaced.
+LEGACY_BASE_URLS = {"https://api.channel3.ai/v1", "https://api.channel3.ai"}
+SEARCH_PATH = "/v1/search"
+MAX_RESULTS_PER_QUERY = 10           # hard cap, whatever the configuration says
+MAX_QUERY_LENGTH = 120
+STALE_KEEP_SECONDS = 14 * 24 * 3600
+LOCALE = {"currency": "USD", "country": "US"}
+
+ERROR_MESSAGES = {
+    "NOT_CONFIGURED": "Product search is not configured (CHANNEL3_API_KEY is empty).",
+    "INVALID_API_KEY": "Channel3 rejected the configured API key.",
+    "CREDITS_EXHAUSTED": "The Channel3 search credits have been used up.",
+    "RATE_LIMITED": "Channel3 is rate limiting requests. Please try again shortly.",
+    "INVALID_REQUEST": "Channel3 couldn't process this search.",
+    "TIMEOUT": "Channel3 took too long to answer.",
+    "NETWORK": "MYMILE couldn't reach Channel3.",
+    "SERVICE_ERROR": "Channel3 returned an error. Please try again later.",
+    "INVALID_RESPONSE": "Channel3 sent a response MYMILE couldn't read.",
+}
+
+
+class Channel3Error(Exception):
+    def __init__(self, code: str):
+        self.code = code
+        self.message = ERROR_MESSAGES.get(code, ERROR_MESSAGES["SERVICE_ERROR"])
+        super().__init__(f"{code}: {self.message}")
+
+
+def api_key() -> str:
+    return (settings.CHANNEL3_API_KEY or "").strip()
+
+
+def is_enabled() -> bool:
+    return bool(api_key())
+
+
+def base_url() -> str:
+    url = (settings.CHANNEL3_BASE_URL or "").strip().rstrip("/")
+    if not url or url in LEGACY_BASE_URLS:
+        if url:
+            log.warning("CHANNEL3_BASE_URL %s is not Channel3's documented API; using %s", url, DEFAULT_BASE_URL)
+        return DEFAULT_BASE_URL
+    return url
+
+
+def results_per_query() -> int:
+    return max(1, min(int(settings.CHANNEL3_RESULTS_PER_QUERY or 4), MAX_RESULTS_PER_QUERY))
+
+
+def max_queries_per_trip() -> int:
+    return max(1, min(int(settings.CHANNEL3_MAX_QUERIES_PER_TRIP or 3), 5))
+
+
+def clean_query(query: str) -> str:
+    return " ".join(str(query or "").split())[:MAX_QUERY_LENGTH]
+
+
+# ------------------------------------------------------------ normalization ---
+def _http_url(value) -> Optional[str]:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    p = urlparse(value.strip())
+    return value.strip() if p.scheme in ("http", "https") and p.netloc else None
+
+
+def _num(value) -> Optional[float]:
+    try:
+        n = float(value)
+        return n if n >= 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _text(value) -> Optional[str]:
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def _offers(raw) -> List[dict]:
+    out = []
+    for o in raw if isinstance(raw, list) else []:
+        if not isinstance(o, dict) or not _text(o.get("domain")):
+            continue
+        price = o.get("price") if isinstance(o.get("price"), dict) else {}
+        availability = o.get("availability")
+        out.append({
+            "retailer": o["domain"].strip(),
+            "url": _http_url(o.get("url")),
+            "price": _num(price.get("price")),
+            "compare_at_price": _num(price.get("compare_at_price")),
+            "currency": _text(price.get("currency")),
+            "availability": availability if availability in ("InStock", "OutOfStock") else None,
+        })
+    return out
+
+
+def _main_offer(offers: List[dict]) -> Optional[dict]:
+    """In-stock before out-of-stock, then the lowest listed price; offers without a price last."""
+    if not offers:
+        return None
+    return sorted(offers, key=lambda o: (o["availability"] != "InStock", o["price"] is None, o["price"] or 0))[0]
+
+
+def normalize_product(raw: Any, query: str) -> Optional[dict]:
+    if not isinstance(raw, dict) or not _text(raw.get("id")) or not _text(raw.get("title")):
+        return None
+    images = [i for i in raw.get("images") or [] if isinstance(i, dict) and _http_url(i.get("url"))]
+    main_image = next((i for i in images if i.get("is_main_image")), images[0] if images else None)
+    brands = [b.get("name").strip() for b in raw.get("brands") or [] if isinstance(b, dict) and _text(b.get("name"))]
+    category = raw.get("category") if isinstance(raw.get("category"), dict) else {}
+    ratings = raw.get("ratings") if isinstance(raw.get("ratings"), dict) else {}
+    variants = []
+    options = (raw.get("variants") or {}).get("options") if isinstance(raw.get("variants"), dict) else None
+    for opt in (options or [])[:3]:
+        if not isinstance(opt, dict) or not _text(opt.get("name")):
+            continue
+        labels = [v["label"] for v in opt.get("values") or []
+                  if isinstance(v, dict) and _text(v.get("label")) and v.get("available", True) is not False][:6]
+        if labels:
+            variants.append(f"{opt['name'].strip()}: {', '.join(labels)}")
+    offers = _offers(raw.get("offers"))
+    main = _main_offer(offers)
+    count = ratings.get("count")
+    return {
+        "id": raw["id"].strip(),
+        "name": raw["title"].strip(),
+        "description": _text(raw.get("description")),
+        "brand": brands[0] if brands else None,
+        "image_url": _http_url(main_image.get("url")) if main_image else None,
+        "category": _text(category.get("title")),
+        "rating": _num(ratings.get("value")),
+        "rating_count": int(count) if isinstance(count, (int, float)) and count >= 0 else None,
+        "variants": variants,
+        "offers": offers,
+        "price": main["price"] if main else None,
+        "compare_at_price": main["compare_at_price"] if main else None,
+        "currency": main["currency"] if main else None,
+        "retailer": main["retailer"] if main else None,
+        "purchase_url": main["url"] if main else None,
+        "in_stock": (main["availability"] == "InStock") if main and main["availability"] else None,
+        "search_query": query,
+    }
+
+
+def to_item(product: dict, reason: Optional[str] = None) -> ProductItem:
+    data = {**product, "offers": [ProductOffer(**o) for o in product.get("offers") or []]}
+    if reason:
+        data["reason"] = reason
+    return ProductItem(**data)
+
+
+# ---------------------------------------------------------------- transport ---
+def _make_client() -> httpx.AsyncClient:
+    return httpx.AsyncClient(timeout=float(settings.CHANNEL3_TIMEOUT_SECONDS or 15))
+
+
+def _classify(status: int) -> str:
+    return {401: "INVALID_API_KEY", 403: "INVALID_API_KEY", 402: "CREDITS_EXHAUSTED", 429: "RATE_LIMITED",
+            400: "INVALID_REQUEST", 422: "INVALID_REQUEST", 504: "TIMEOUT"}.get(
+        status, "SERVICE_ERROR" if status >= 500 else "INVALID_RESPONSE")
+
+
+async def _post_search(query: str, limit: int) -> list:
+    """One Channel3 search request (= 1 credit). Raises Channel3Error."""
+    key = api_key()
+    if not key:
+        raise Channel3Error("NOT_CONFIGURED")
+    body = {"query": query, "limit": limit, "config": dict(LOCALE)}
+    try:
+        async with _make_client() as client:
+            resp = await client.post(base_url() + SEARCH_PATH, json=body,
+                                     headers={"x-api-key": key, "Content-Type": "application/json"})
+    except httpx.TimeoutException:
+        log.warning("Channel3 search timed out")
+        raise Channel3Error("TIMEOUT") from None
+    except (httpx.HTTPError, OSError) as exc:
+        log.warning("Channel3 search failed: %s", type(exc).__name__)
+        raise Channel3Error("NETWORK") from None
+    except Exception as exc:  # any other transport failure: a clear error, never a 500
+        log.warning("Channel3 search failed: %s", type(exc).__name__)
+        raise Channel3Error("SERVICE_ERROR") from None
+    if resp.status_code != 200:
+        code = _classify(resp.status_code)
+        log.warning("Channel3 search failed: %s (HTTP %s)", code, resp.status_code)
+        raise Channel3Error(code)
+    try:
+        data = resp.json()
+    except ValueError:
+        raise Channel3Error("INVALID_RESPONSE") from None
+    if not isinstance(data, dict) or not isinstance(data.get("products"), list):
+        raise Channel3Error("INVALID_RESPONSE")
+    return data["products"]
+
+
+# -------------------------------------------------------------------- cache ---
+_table_ready: set = set()
+_inflight: Dict[str, "asyncio.Future"] = {}
+
+
+def _db():
+    conn = database.connect()
+    path = str(database.DB_PATH)
+    if path not in _table_ready:
+        conn.execute("CREATE TABLE IF NOT EXISTS channel3_cache ("
+                     " cache_key TEXT PRIMARY KEY, payload TEXT NOT NULL, checked_at REAL NOT NULL)")
+        conn.commit()
+        _table_ready.add(path)
+    return conn
+
+
+def _cache_get(key: str) -> Optional[tuple]:
+    try:
+        with closing(_db()) as conn:
+            row = conn.execute("SELECT payload, checked_at FROM channel3_cache WHERE cache_key=?", (key,)).fetchone()
+    except Exception as exc:  # the cache is an optimisation: never fail a search because of it
+        log.warning("Channel3 cache unavailable: %s", type(exc).__name__)
+        return None
+    if not row or time.time() - row["checked_at"] > STALE_KEEP_SECONDS:
+        return None
+    return row["checked_at"], json.loads(row["payload"])
+
+
+def _cache_put(key: str, payload: list, checked: float) -> None:
+    try:
+        with closing(_db()) as conn:
+            conn.execute("INSERT OR REPLACE INTO channel3_cache (cache_key, payload, checked_at) VALUES (?,?,?)",
+                         (key, json.dumps(payload), checked))
+            conn.execute("DELETE FROM channel3_cache WHERE checked_at < ?", (time.time() - STALE_KEEP_SECONDS,))
+            conn.commit()
+    except Exception as exc:
+        log.warning("Channel3 cache unavailable: %s", type(exc).__name__)
+
+
+def reset_inflight() -> None:
+    _inflight.clear()
+
+
+async def search(query: str, limit: Optional[int] = None) -> dict:
+    """{"products": [normalized dict], "checked_at": epoch, "stale": bool}. Raises Channel3Error."""
+    if not is_enabled():
+        raise Channel3Error("NOT_CONFIGURED")
+    query = clean_query(query)
+    if len(query) < 2:
+        raise Channel3Error("INVALID_REQUEST")
+    limit = max(1, min(int(limit or results_per_query()), results_per_query()))
+    key = f"search|{query.lower()}|{limit}|{LOCALE['currency']}|{LOCALE['country']}"
+    hit = _cache_get(key)
+    ttl = max(float(settings.CHANNEL3_CACHE_TTL_HOURS or 0), 0.0) * 3600
+    if hit and time.time() - hit[0] < ttl:
+        return {"products": hit[1], "checked_at": hit[0], "stale": False}
+
+    task = _inflight.get(key)
+    if task is None:
+        async def run():
+            raw = await _post_search(query, limit)
+            products = [p for p in (normalize_product(r, query) for r in raw) if p][:limit]
+            checked = time.time()
+            _cache_put(key, products, checked)
+            return products, checked
+
+        task = asyncio.ensure_future(run())
+        _inflight[key] = task
+        task.add_done_callback(lambda t, k=key: _inflight.pop(k, None) if _inflight.get(k) is t else None)
+    try:
+        products, checked = await asyncio.shield(task)
+    except Channel3Error:
+        if hit:
+            return {"products": hit[1], "checked_at": hit[0], "stale": True}
+        raise
+    return {"products": products, "checked_at": checked, "stale": False}
+
+
+# ------------------------------------------------------------------- policy ---
+def apply_purchase_link_policy(response: ProductSearchResponse, plan: str) -> ProductSearchResponse:
+    """External purchase links are a Premium feature.
+
+    Premium: unchanged. Anyone else (guests, Free, expired): products keep all their
+    details, but `purchase_url` and every offer `url` are None. Works on copies.
+    `plan` must be the server-verified plan.
     """
-    Integrates with Channel3 API (https://www.channel3.ai/) to find travel gear.
-    Uses CHANNEL3_API_KEY if configured, or returns verified authentic products mapped
-    specifically to trip type, weather, and destination.
-    """
-    # 1. Check if real Channel3 API key is configured
-    if settings.CHANNEL3_API_KEY:
-        try:
-            async with httpx.AsyncClient(timeout=8.0) as client:
-                headers = {
-                    "Authorization": f"Bearer {settings.CHANNEL3_API_KEY}",
-                    "Content-Type": "application/json"
-                }
-                payload = {
-                    "query": f"travel essentials for {destination} {trip_type} in {season}",
-                    "destination": destination,
-                    "trip_type": trip_type,
-                    "limit": limit
-                }
-                resp = await client.post(
-                    f"{settings.CHANNEL3_BASE_URL}/products/search",
-                    headers=headers,
-                    json=payload
-                )
-                if resp.status_code == 200:
-                    data = resp.json()
-                    products_raw = data.get("products", data.get("data", []))
-                    if products_raw:
-                        parsed = []
-                        for item in products_raw[:limit]:
-                            parsed.append(ProductItem(
-                                id=str(item.get("id", item.get("sku", "c3-prod"))),
-                                name=item.get("title", item.get("name")),
-                                price=float(item.get("price", 29.99)),
-                                currency=item.get("currency", "USD"),
-                                image_url=item.get("image_url", item.get("thumbnail")),
-                                description=item.get("description", "Channel3 curated travel essential."),
-                                category=item.get("category", "Gear"),
-                                rating=float(item.get("rating", 4.8)),
-                                purchase_url=item.get("url", item.get("purchase_link", "https://channel3.ai")),
-                                brand=item.get("brand"),
-                                reason=f"Channel3 AI match for {destination} {trip_type}.",
-                                in_stock=item.get("in_stock", True),
-                                provider="Channel3 Live Commerce API"
-                            ))
-                        return ProductSearchResponse(
-                            query_context=f"{destination} · {trip_type} · {season}",
-                            products=parsed,
-                            source="Channel3 Live API (https://www.channel3.ai/)"
-                        )
-        except Exception:
-            pass  # Fall back to verified catalog
+    if plan == "premium":
+        return response
+    return response.model_copy(update={"products": [
+        p.model_copy(update={"purchase_url": None,
+                             "offers": [o.model_copy(update={"url": None}) for o in p.offers]})
+        for p in response.products
+    ]})
 
-    # 2. Match relevant products from the verified catalog
-    matched = []
-    dest_lower = destination.lower()
-    trip_lower = trip_type.lower()
-    
-    # Priority matching by trip type
-    if "umrah" in trip_lower or "makkah" in dest_lower or "madinah" in dest_lower:
-        for p in AUTHENTIC_CATALOG:
-            if p.category == "Religious/Umrah" or p.id in ["c3-uni-01", "c3-uni-03"]:
-                matched.append(p)
-    elif "cairo" in dest_lower or "giza" in dest_lower or "egypt" in dest_lower or "dubai" in dest_lower:
-        for p in AUTHENTIC_CATALOG:
-            if "des" in p.id or p.id in ["c3-uni-01", "c3-uni-02", "c3-uni-03", "c3-foot-06"]:
-                matched.append(p)
-    elif "kyoto" in dest_lower or "japan" in dest_lower or "paris" in dest_lower or "london" in dest_lower:
-        for p in AUTHENTIC_CATALOG:
-            if p.id in ["c3-rain-05", "c3-uni-02", "c3-uni-03", "c3-uni-01", "c3-foot-06", "c3-uni-04"]:
-                matched.append(p)
-    else:
-        matched = [p for p in AUTHENTIC_CATALOG if p.category != "Religious/Umrah"]
-        
-    return ProductSearchResponse(
-        query_context=f"{destination} · {trip_type} ({season})",
-        products=matched[:limit],
-        source="Channel3 AI Product Recommendation Engine"
-    )
+
+async def search_products_response(query: str, limit: Optional[int] = None,
+                                   plan: str = "free") -> ProductSearchResponse:
+    """A direct search (GET /api/products/search). Closed by default: no links unless plan == 'premium'."""
+    query = clean_query(query)
+    try:
+        found = await search(query, limit)
+    except Channel3Error as err:
+        status = "not_configured" if err.code == "NOT_CONFIGURED" else "unavailable"
+        return ProductSearchResponse(query_context=query, products=[], status=status, message=err.message)
+    items = [to_item(p) for p in found["products"]]
+    response = ProductSearchResponse(query_context=query, products=items, status="ok" if items else "empty",
+                                     message=None if items else "Channel3 found no products for this search.")
+    return apply_purchase_link_policy(response, plan)

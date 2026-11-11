@@ -1,9 +1,13 @@
-import React, { useMemo } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AgGridReact } from 'ag-grid-react';
-import { ModuleRegistry, AllCommunityModule, ColDef, RowSelectedEvent } from 'ag-grid-community';
+import {
+  ModuleRegistry, AllCommunityModule, ColDef, GridApi, GridReadyEvent, RowClickedEvent, RowSelectionOptions,
+} from 'ag-grid-community';
 import 'ag-grid-community/styles/ag-grid.css';
 import 'ag-grid-community/styles/ag-theme-quartz.css';
 import { Hotel } from '../types';
+import { PRICE_VARIES_NOTE, formatMoney } from '../services/exploreView';
+import { createSelectionGate, hotelSearchText, nullsLastComparator, ratingValue } from '../services/hotelComparison';
 
 ModuleRegistry.registerModules([AllCommunityModule]);
 
@@ -22,181 +26,244 @@ export const AgGridHotelComparison: React.FC<AgGridHotelComparisonProps> = ({
   isPremium,
   totalNights
 }) => {
+  const apiRef = useRef<GridApi<Hotel> | null>(null);
+  const [search, setSearch] = useState('');
+  // On phones the hotel column scrolls with the others, so pinned columns don't fill the screen.
+  const [narrow, setNarrow] = useState(
+    () => typeof window !== 'undefined' && window.matchMedia('(max-width: 640px)').matches);
+  useEffect(() => {
+    const mq = window.matchMedia('(max-width: 640px)');
+    const update = () => setNarrow(mq.matches);
+    mq.addEventListener('change', update);
+    return () => mq.removeEventListener('change', update);
+  }, []);
+  // Latest values for cell renderers, so column definitions (and the user's sort/filter
+  // state) never need to be rebuilt when the selection changes.
+  const selectedRef = useRef<string | undefined>(selectedHotelId);
+  selectedRef.current = selectedHotelId;
+  const onSelectRef = useRef(onSelectHotel);
+  onSelectRef.current = onSelectHotel;
+  const gateRef = useRef(createSelectionGate(selectedHotelId));
+
+  // Row clicks and the Choose button share this path; the gate drops repeats.
+  const choose = useCallback((hotel: Hotel | undefined) => {
+    if (!hotel || hotel.is_placeholder) return;
+    if (gateRef.current.select(hotel.id)) onSelectRef.current(hotel);
+  }, []);
+
+  // Mirror the app's selected hotel into AG Grid's row selection (source 'api'),
+  // whether it came from this grid, the assistant, or a new plan.
+  const syncSelection = useCallback(() => {
+    const api = apiRef.current;
+    const id = selectedRef.current;
+    gateRef.current.sync(id);
+    if (!api) return;
+    const node = id ? api.getRowNode(id) : undefined;
+    if (node) node.setSelected(true, true, 'api');
+    else api.deselectAll();
+    api.refreshCells({ columns: ['select'], force: true });
+  }, []);
+
+  useEffect(syncSelection, [selectedHotelId, hotels, syncSelection]);
+
+  const onGridReady = useCallback((e: GridReadyEvent<Hotel>) => {
+    apiRef.current = e.api;
+    syncSelection();
+  }, [syncSelection]);
+
+  const onRowClicked = useCallback((e: RowClickedEvent<Hotel>) => {
+    const target = e.event?.target as HTMLElement | null;
+    // Links open the provider; the Choose button selects on its own.
+    if (target?.closest('a, button')) return;
+    choose(e.data);
+  }, [choose]);
+
+  const rowSelection = useMemo<RowSelectionOptions<Hotel>>(() => ({
+    mode: 'singleRow',
+    checkboxes: false,
+    enableClickSelection: false, // clicks go through choose(); AG Grid selection follows the app state
+    isRowSelectable: (node) => !node.data?.is_placeholder,
+  }), []);
+
   const columnDefs: ColDef<Hotel>[] = useMemo(() => [
     {
-      headerName: 'Select',
-      width: 100,
+      colId: 'select',
+      headerName: '',
+      width: 108,
       pinned: 'left',
+      sortable: false,
+      resizable: false,
+      getQuickFilterText: () => '',
       cellRenderer: (params: any) => {
         const hotel = params.data as Hotel;
-        const isSelected = hotel.id === selectedHotelId || (hotel.is_best_match && !selectedHotelId);
+        const isSelected = hotel.id === selectedRef.current;
         return (
-          <div className="flex items-center justify-center h-full">
-            <button
-              onClick={() => onSelectHotel(hotel)}
-              className={`px-3 py-1 rounded-full text-xs font-bold transition-all ${
-                isSelected
-                  ? 'bg-blue-600 text-white shadow-sm'
-                  : 'bg-gray-100 text-gray-700 hover:bg-yellow-400 hover:text-gray-900'
-              }`}
-            >
-              {isSelected ? 'Selected' : 'Choose'}
-            </button>
-          </div>
+          <button
+            type="button"
+            aria-pressed={isSelected}
+            onClick={() => choose(hotel)}
+            className={`mm-choose${isSelected ? ' selected' : ''}`}
+          >
+            {isSelected ? 'Selected' : 'Choose'}
+          </button>
         );
       }
     },
     {
-      headerName: 'Hotel Name & Match',
+      headerName: 'Hotel',
       field: 'name',
-      minWidth: 240,
-      flex: 2,
+      width: narrow ? 220 : 270,
+      pinned: narrow ? null : 'left',
+      getQuickFilterText: (params) => (params.data ? hotelSearchText(params.data) : ''),
       cellRenderer: (params: any) => {
         const h = params.data as Hotel;
         return (
-          <div className="flex flex-col justify-center h-full py-1">
-            <div className="flex items-center gap-2">
-              <span className="font-bold text-gray-900">{h.name}</span>
-              {h.is_best_match && (
-                <span className="bg-yellow-100 text-yellow-800 text-[10px] font-extrabold px-2 py-0.5 rounded-full border border-yellow-300">
-                  BEST MATCH
-                </span>
-              )}
-            </div>
-            <span className="text-xs text-gray-500 truncate">{h.location}</span>
+          <div className="mm-cell-stack" title={`${h.name} · ${h.location}`}>
+            <span className="mm-cell-title">{h.name}</span>
+            <span className="mm-cell-sub">
+              {h.is_best_match && <span className="mm-best">Best match</span>}
+              <span className="mm-truncate">{h.location}</span>
+            </span>
           </div>
         );
       }
     },
     {
+      colId: 'rating',
       headerName: 'Rating',
-      field: 'rating',
-      width: 110,
+      valueGetter: (params) => ratingValue(params.data),
+      width: 108,
       sortable: true,
+      sortingOrder: ['desc', 'asc', null],
+      comparator: nullsLastComparator,
       filter: 'agNumberColumnFilter',
-      cellRenderer: (params: any) => (
-        <div className="flex items-center gap-1 h-full text-sm font-semibold text-gray-800">
-          <span className="text-yellow-500 font-bold">★</span>
-          <span>{params.value}</span>
-          <span className="text-xs text-gray-400">({params.data.reviews_count})</span>
-        </div>
-      )
+      filterParams: { maxNumConditions: 1 },
+      getQuickFilterText: () => '',
+      cellRenderer: (params: any) => (params.value == null ? (
+        <span className="mm-muted">—</span>
+      ) : (
+        <span className="mm-rating"
+              title={params.data.reviews_count ? `${Number(params.data.reviews_count).toLocaleString()} reviews` : undefined}>
+          <span aria-hidden="true">★</span> {params.value}
+        </span>
+      ))
     },
     {
-      headerName: 'Nightly Rate',
+      headerName: 'Per night',
+      headerTooltip: `Estimated. ${PRICE_VARIES_NOTE}`,
       field: 'price_per_night',
-      width: 130,
+      width: 128,
       sortable: true,
+      sortingOrder: ['asc', 'desc', null],
+      comparator: nullsLastComparator,
       filter: 'agNumberColumnFilter',
-      valueFormatter: (params) => `$${params.value}/nt`
+      filterParams: { maxNumConditions: 1 },
+      getQuickFilterText: () => '',
+      cellRenderer: (params: any) => (params.value == null
+        ? <span className="mm-muted">Not listed</span>
+        : <span>{formatMoney(params.value, params.data.currency)}</span>)
     },
     {
-      headerName: `Total (${totalNights} nts)`,
+      headerName: 'Total',
+      headerTooltip: `Estimated total for ${totalNights} night${totalNights === 1 ? '' : 's'}. ${PRICE_VARIES_NOTE}`,
       field: 'total_price',
-      width: 140,
+      width: 128,
       sortable: true,
+      sortingOrder: ['asc', 'desc', null],
+      comparator: nullsLastComparator,
       filter: 'agNumberColumnFilter',
-      cellRenderer: (params: any) => (
-        <div className="flex items-center h-full font-bold text-blue-700">
-          ${params.value.toLocaleString()}
-        </div>
-      )
+      filterParams: { maxNumConditions: 1 },
+      getQuickFilterText: () => '',
+      cellRenderer: (params: any) => (params.value == null
+        ? <span className="mm-muted">—</span>
+        : <span className="mm-total">{formatMoney(params.value, params.data.currency)}</span>)
     },
     {
-      headerName: 'Distance / Location',
+      headerName: 'Nearby',
       field: 'distance_to_center',
-      minWidth: 200,
+      minWidth: 180,
       flex: 1,
-      cellRenderer: (params: any) => (
-        <div className="flex items-center h-full text-xs text-gray-600 truncate">
-          {params.value || 'Central location'}
-        </div>
-      )
+      sortable: false,
+      cellRenderer: (params: any) => (params.value
+        ? <span className="mm-truncate mm-muted" title={params.value}>{params.value}</span>
+        : <span className="mm-muted">—</span>)
     },
     {
-      headerName: 'Key Amenities',
+      headerName: 'Amenities',
       field: 'amenities',
-      minWidth: 220,
-      flex: 1.5,
+      minWidth: 190,
+      flex: 1,
+      sortable: false,
+      getQuickFilterText: () => '',
       cellRenderer: (params: any) => {
         const amenities = (params.value || []) as string[];
+        if (!amenities.length) return <span className="mm-muted">—</span>;
         return (
-          <div className="flex items-center gap-1 h-full overflow-hidden">
-            {amenities.slice(0, 2).map((a, i) => (
-              <span key={i} className="text-[11px] bg-slate-100 text-slate-700 px-2 py-0.5 rounded border border-slate-200 whitespace-nowrap">
-                {a}
-              </span>
-            ))}
-            {amenities.length > 2 && (
-              <span className="text-[10px] text-gray-400">+{amenities.length - 2}</span>
-            )}
-          </div>
+          <span className="mm-truncate mm-muted" title={amenities.join(', ')}>
+            {amenities.slice(0, 2).join(' · ')}
+            {amenities.length > 2 && <span className="mm-more"> +{amenities.length - 2}</span>}
+          </span>
         );
       }
     },
     {
-      headerName: 'Booking Provider',
-      width: 140,
+      headerName: 'Book',
+      width: 150,
+      sortable: false,
+      getQuickFilterText: () => '',
       cellRenderer: (params: any) => {
-        const link = params.data.booking_link;
-        if (!isPremium) {
+        const h = params.data as Hotel;
+        if (!isPremium) return <span className="mm-muted">Premium only</span>;
+        if (h.booking_link) {
           return (
-            <div className="flex items-center h-full text-xs text-gray-400 italic">
-              Premium only
-            </div>
+            <a href={h.booking_link} target="_blank" rel="noopener noreferrer" className="mm-book">
+              {h.booking_link_type === 'provider' && h.booking_provider ? h.booking_provider : 'Book stay'} ↗
+            </a>
           );
         }
-        return link ? (
-          <div className="flex items-center h-full">
-            <a
-              href={link}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="text-xs bg-yellow-400 hover:bg-yellow-500 text-gray-900 font-bold px-3 py-1.5 rounded-lg flex items-center gap-1 transition-all shadow-sm"
-            >
-              Book Stay ↗
-            </a>
-          </div>
-        ) : (
-          <span className="text-xs text-gray-400">Unavailable</span>
-        );
+        return h.data_source === 'serpapi' && h.property_token && !h.is_placeholder
+          // Live hotel: provider links are looked up when it is chosen (one cached lookup).
+          ? <span className="mm-muted">Choose to see sites</span>
+          : <span className="mm-muted">Unavailable</span>;
       }
     }
-  ], [selectedHotelId, isPremium, totalNights, onSelectHotel]);
+  ], [isPremium, totalNights, choose, narrow]);
 
   return (
-    <div className="w-full bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
-      <div className="p-4 bg-slate-50 border-b border-slate-200 flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <div className="flex items-center gap-2">
-            <span className="bg-blue-600 text-white text-[11px] font-bold px-2 py-0.5 rounded">AG GRID PREMIUM</span>
-            <h3 className="text-base font-bold text-gray-900">Hotel Comparison & Live Trade-Off Matrix</h3>
-          </div>
-          <p className="text-xs text-gray-500 mt-0.5">
-            Sort by rating or price. Selecting any hotel updates your budget balance dynamically.
-          </p>
-        </div>
-        <div className="flex items-center gap-2 text-xs text-gray-600">
-          <span className="w-2.5 h-2.5 rounded-full bg-green-500"></span>
-          <span>Verified Accommodations Data</span>
-        </div>
+    <div className="mm-grid-shell">
+      <div className="mm-grid-toolbar">
+        <input
+          type="search"
+          className="mm-grid-search"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder="Search hotels, areas or amenities"
+          aria-label="Search hotels"
+        />
+        <span className="mm-grid-meta">
+          {hotels.length} stay{hotels.length === 1 ? '' : 's'} · Powered by AG Grid
+        </span>
       </div>
-      <div className="ag-theme-quartz" style={{ height: '360px', width: '100%' }}>
+      <div className="ag-theme-quartz mm-grid mm-hotel-grid">
         <AgGridReact
+          theme="legacy"
           rowData={hotels}
           columnDefs={columnDefs}
           defaultColDef={{
             resizable: true,
             sortable: true,
           }}
-          rowHeight={56}
-          headerHeight={44}
+          getRowId={(p) => p.data.id}
+          rowSelection={rowSelection}
+          quickFilterText={search}
+          overlayNoRowsTemplate="No hotels match your search or filters."
+          domLayout="autoHeight"
+          rowHeight={60}
+          headerHeight={42}
+          tooltipShowDelay={300}
           animateRows={true}
-          onRowSelected={(e: RowSelectedEvent<Hotel>) => {
-            if (e.node.isSelected() && e.data) {
-              onSelectHotel(e.data);
-            }
-          }}
+          onGridReady={onGridReady}
+          onRowClicked={onRowClicked}
         />
       </div>
     </div>

@@ -1,24 +1,23 @@
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Depends, Query
+from app.api.routes.auth import get_effective_plan
 from app.schemas.product_schema import ProductSearchResponse
-from app.services.channel3_service import search_channel3_products
+from app.services import channel3_service
 
-router = APIRouter(prefix="/products", tags=["Channel3 E-commerce & Products"])
+router = APIRouter(prefix="/products", tags=["Products (Channel3)"])
+
 
 @router.get("/search", response_model=ProductSearchResponse)
 async def search_products(
-    destination: str = Query("Kyoto, Japan", description="Trip destination"),
-    trip_type: str = Query("Tourism", description="Trip purpose (Tourism, Umrah, Business)"),
-    season: str = Query("Spring", description="Season or weather climate"),
-    limit: int = Query(6, ge=1, le=12, description="Number of products")
+    query: str = Query(..., min_length=2, max_length=channel3_service.MAX_QUERY_LENGTH,
+                       description="Product search, e.g. 'packable rain jacket'"),
+    limit: int = Query(4, ge=1, le=channel3_service.MAX_RESULTS_PER_QUERY, description="Number of products"),
+    # Server-verified from the Bearer token (guests -> 'free'). A `plan` query
+    # parameter sent by the client is ignored.
+    plan: str = Depends(get_effective_plan),
 ):
     """
-    Sponsor Integration: Channel3.
-    Retrieves authentic travel essentials, prices, images, and original purchase links.
-    Never fabricates prices or fake items.
+    Searches real products through Channel3 (cached; 1 credit per new search).
+    Everyone sees product details; the retailer `purchase_url` and offer URLs are
+    Premium only (null for guests and Free users), decided server-side.
     """
-    return await search_channel3_products(
-        destination=destination,
-        trip_type=trip_type,
-        season=season,
-        limit=limit
-    )
+    return await channel3_service.search_products_response(query, limit, plan=plan)

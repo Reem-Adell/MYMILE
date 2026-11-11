@@ -12,7 +12,6 @@ FastAPI-powered backend implementing the MYMILE Travel Agent, tool-calling frame
 - **Sponsor Integrations:**
   - **Channel3:** Product search, verified catalog, authentic purchase links.
   - **AG Grid:** Structured data endpoints formatted for AG Grid comparison tables.
-  - **APIMatic:** OpenAPI 3.0.3 APIMatic-compliant spec and multi-language SDK endpoints.
 
 ## Running Locally
 

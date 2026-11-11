@@ -1,37 +1,54 @@
 from typing import List, Optional
 from pydantic import BaseModel
 
+
+class ProductOffer(BaseModel):
+    """One retailer's offer, as returned by Channel3 (offers[])."""
+    retailer: str                        # offer.domain, e.g. "rei.com"
+    url: Optional[str] = None            # buy link; Premium only (None for guests/Free)
+    price: Optional[float] = None
+    compare_at_price: Optional[float] = None
+    currency: Optional[str] = None
+    availability: Optional[str] = None   # "InStock" | "OutOfStock"
+
+
 class ProductItem(BaseModel):
+    """A product found by Channel3. Fields Channel3 didn't return stay None/empty: nothing is invented."""
     id: str
     name: str
-    price: float
-    currency: str = "USD"
-    image_url: str
-    description: str
-    category: str  # Clothing, Gear, Tech, Accessories, Religious/Umrah
-    rating: float = 4.8
-    purchase_url: str  # Direct purchase link on partner site
+    price: Optional[float] = None        # from the main offer
+    compare_at_price: Optional[float] = None
+    currency: Optional[str] = None
+    image_url: Optional[str] = None
+    description: Optional[str] = None
+    category: Optional[str] = None
+    rating: Optional[float] = None
+    rating_count: Optional[int] = None
+    # Main offer's buy link on the retailer site. Premium only: null for guests and
+    # Free users (enforced server-side by apply_purchase_link_policy).
+    purchase_url: Optional[str] = None
     brand: Optional[str] = None
-    reason: str  # Explanation why this fits destination/season
-    in_stock: bool = True
-    provider: str = "Channel3 AI Commerce"
+    retailer: Optional[str] = None
+    reason: Optional[str] = None         # Gemini's short recommendation reason
+    in_stock: Optional[bool] = None      # None = unknown
+    variants: List[str] = []             # e.g. "Size: S, M, L"
+    offers: List[ProductOffer] = []
+    search_query: Optional[str] = None   # the search that found it
+    provider: str = "Channel3"
 
-class ProductSearchRequest(BaseModel):
-    destination: str
-    trip_type: str = "Tourism"  # Tourism, Business, Umrah, Adventure
-    season_or_month: Optional[str] = "Spring"
-    weather_condition: Optional[str] = "Mild"
-    preferences: Optional[List[str]] = None
-    limit: int = 6
 
 class ProductSearchResponse(BaseModel):
     query_context: str
     products: List[ProductItem]
-    source: str = "Channel3 Product Discovery Engine"
+    source: str = "Channel3"
+    status: str = "ok"                   # ok | empty | not_configured | unavailable
+    message: Optional[str] = None
+
 
 class CartItem(BaseModel):
     product: ProductItem
     quantity: int = 1
+
 
 class CartSummary(BaseModel):
     items: List[CartItem]

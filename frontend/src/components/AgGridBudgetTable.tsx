@@ -3,7 +3,8 @@ import { AgGridReact } from 'ag-grid-react';
 import { ModuleRegistry, AllCommunityModule, ColDef } from 'ag-grid-community';
 import 'ag-grid-community/styles/ag-grid.css';
 import 'ag-grid-community/styles/ag-theme-quartz.css';
-import { BudgetBreakdown, BudgetCategoryDetail } from '../types';
+import { BudgetBreakdown } from '../types';
+import { formatMoney } from '../services/exploreView';
 
 ModuleRegistry.registerModules([AllCommunityModule]);
 
@@ -49,7 +50,7 @@ export const AgGridBudgetTable: React.FC<AgGridBudgetTableProps> = ({ breakdown,
       description: 'Historic landmarks, tickets, temple entries'
     },
     {
-      category: 'Travel Essentials (Channel3)',
+      category: 'Travel Essentials',
       amount: breakdown.travel_essentials,
       share: Math.round((breakdown.travel_essentials / total) * 100),
       description: 'Smart packing gear, adapters, rain shell'
@@ -62,55 +63,49 @@ export const AgGridBudgetTable: React.FC<AgGridBudgetTableProps> = ({ breakdown,
     }
   ], [breakdown, total]);
 
+  const currency = breakdown.currency || 'USD';
   const columnDefs: ColDef<BudgetRow>[] = useMemo(() => [
     {
-      headerName: 'Expense Category',
+      headerName: 'Category',
       field: 'category',
-      minWidth: 220,
-      flex: 1.5,
-      cellRenderer: (params: any) => (
-        <span className="font-bold text-gray-900">{params.value}</span>
-      )
+      minWidth: 210,
+      flex: 1.3,
+      cellRenderer: (params: any) => <span className="mm-cell-title">{params.value}</span>
     },
     {
-      headerName: 'Allocated Amount',
+      headerName: 'Amount',
       field: 'amount',
-      width: 160,
+      width: 130,
       sortable: true,
       filter: 'agNumberColumnFilter',
-      cellRenderer: (params: any) => (
-        <span className="font-extrabold text-blue-700 text-sm">
-          ${params.value?.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-        </span>
-      )
+      filterParams: { maxNumConditions: 1 },
+      enableCellChangeFlash: true, // briefly highlights the amount that changed after a hotel switch
+      cellRenderer: (params: any) => <span className="mm-total">{formatMoney(params.value ?? 0, currency)}</span>
     },
     {
-      headerName: 'Share of Total',
+      headerName: 'Share',
       field: 'share',
-      width: 140,
+      width: 150,
       sortable: true,
       cellRenderer: (params: any) => {
         const val = params.value || 0;
         return (
-          <div className="flex items-center gap-2 h-full w-full">
-            <div className="w-16 bg-gray-200 h-2 rounded-full overflow-hidden">
-              <div className="bg-yellow-400 h-full rounded-full" style={{ width: `${Math.min(val, 100)}%` }} />
-            </div>
-            <span className="text-xs font-semibold text-gray-700">{val}%</span>
-          </div>
+          <span className="mm-share">
+            <span className="mm-share-track"><span style={{ width: `${Math.min(val, 100)}%` }} /></span>
+            <span className="mm-share-value">{val}%</span>
+          </span>
         );
       }
     },
     {
-      headerName: 'Allocation Details & Purpose',
+      headerName: 'Details',
       field: 'description',
-      minWidth: 240,
+      minWidth: 220,
       flex: 2,
-      cellRenderer: (params: any) => (
-        <span className="text-xs text-gray-600">{params.value}</span>
-      )
+      sortable: false,
+      cellRenderer: (params: any) => <span className="mm-truncate mm-muted" title={params.value}>{params.value}</span>
     }
-  ], []);
+  ], [currency]);
 
   const remaining = breakdown.remaining_balance !== undefined && breakdown.remaining_balance !== null
     ? breakdown.remaining_balance
@@ -118,39 +113,39 @@ export const AgGridBudgetTable: React.FC<AgGridBudgetTableProps> = ({ breakdown,
 
   const isPositive = remaining >= 0;
 
+  // Target and remaining are shown only when the traveler set a budget (no fallback figures).
+  const hasUserBudget = !!(userBudget || breakdown.user_budget);
+
   return (
-    <div className="w-full bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
-      <div className="p-4 bg-slate-50 border-b border-slate-200 flex flex-wrap items-center justify-between gap-3">
+    <div className="mm-grid-shell">
+      <div className="mm-grid-toolbar mm-budget-summary">
+        {hasUserBudget && (
+          <div>
+            <small>Your budget</small>
+            <b>{formatMoney(targetBudget, currency)}</b>
+          </div>
+        )}
         <div>
-          <div className="flex items-center gap-2">
-            <span className="bg-yellow-400 text-gray-900 text-[11px] font-extrabold px-2 py-0.5 rounded">
-              AG GRID ANALYTICS
-            </span>
-            <h3 className="text-base font-bold text-gray-900">Multi-Category Budget Breakdown</h3>
-          </div>
-          <p className="text-xs text-gray-500 mt-0.5">
-            Balanced dynamically by the MYMILE AI Optimization Agent.
-          </p>
+          <small>Estimated total</small>
+          <b>{formatMoney(breakdown.total_estimated, currency)}</b>
         </div>
-        <div className="flex items-center gap-4">
-          <div className="text-right">
-            <span className="text-[11px] text-gray-500 block uppercase font-bold tracking-wider">Target Budget</span>
-            <span className="text-sm font-extrabold text-gray-900">${targetBudget.toLocaleString()}</span>
+        {hasUserBudget && (
+          <div>
+            <small>{isPositive ? 'Remaining' : 'Over budget'}</small>
+            <b className={isPositive ? 'good' : 'bad'}>{formatMoney(Math.abs(remaining), currency)}</b>
           </div>
-          <div className="text-right">
-            <span className="text-[11px] text-gray-500 block uppercase font-bold tracking-wider">Remaining Buffer</span>
-            <span className={`text-sm font-extrabold ${isPositive ? 'text-green-600' : 'text-red-500'}`}>
-              ${remaining.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-            </span>
-          </div>
-        </div>
+        )}
+        <span className="mm-grid-meta">Powered by AG Grid</span>
       </div>
-      <div className="ag-theme-quartz" style={{ height: '320px', width: '100%' }}>
+      <div className="ag-theme-quartz mm-grid">
         <AgGridReact
+          theme="legacy"
           rowData={rowData}
+          getRowId={(p) => p.data.category}
           columnDefs={columnDefs}
           defaultColDef={{ resizable: true, sortable: true }}
-          rowHeight={48}
+          domLayout="autoHeight"
+          rowHeight={52}
           headerHeight={42}
           animateRows={true}
         />

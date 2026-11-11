@@ -1,3 +1,4 @@
+from app.core.destinations import resolve_city
 from typing import List
 from app.schemas.places_schema import PlaceItem, PlacesSearchResponse
 
@@ -104,10 +105,9 @@ REAL_PLACES_DB = [
 ]
 
 def search_places(destination: str) -> PlacesSearchResponse:
-    dest_lower = destination.lower()
-    matches = [p for p in REAL_PLACES_DB if p["destination"] in dest_lower or (p["destination"] == "cairo" and "egypt" in dest_lower)]
-    if not matches:
-        matches = [p for p in REAL_PLACES_DB if p["destination"] == "kyoto"]
+    city = resolve_city(destination)
+    # Unknown city: return nothing rather than another city's sights.
+    matches = [p for p in REAL_PLACES_DB if p["destination"] == city] if city else []
         
     items = [PlaceItem(**p) for p in matches]
     return PlacesSearchResponse(destination=destination, places=items)

@@ -1,6 +1,8 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from app.agents import gemini_client
 from app.core.config import settings
+from app.core.paypal_client import is_paypal_configured
 from app.api.routes import (
     auth,
     trips,
@@ -10,7 +12,7 @@ from app.api.routes import (
     products,
     budget,
     subscriptions,
-    apimatic_routes
+    payments
 )
 
 app = FastAPI(
@@ -19,9 +21,8 @@ app = FastAPI(
         "MYMILE – AI-Powered Travel Agent & E-commerce Platform.\n\n"
         "Features:\n"
         "- AI Travel Agent with multi-tool calling\n"
-        "- Sponsor 1: Channel3 verified travel essentials discovery and purchase links\n"
+        "- Sponsor 1: Channel3 product search for trip essentials (purchase links for Premium)\n"
         "- Sponsor 2: AG Grid interactive comparison tables for hotels and budgets\n"
-        "- Sponsor 3: APIMatic OpenAPI 3.0 specification, validation, and multi-language SDK workflow\n"
         "- Real-time weather forecasting via Open-Meteo\n"
         "- Free and Premium subscription tiers with backend-enforced feature gating"
     ),
@@ -34,7 +35,7 @@ app = FastAPI(
 # CORS Middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=settings.BACKEND_CORS_ORIGINS,  # explicit list, never "*"
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -49,7 +50,7 @@ app.include_router(places.router, prefix=settings.API_V1_STR)
 app.include_router(products.router, prefix=settings.API_V1_STR)
 app.include_router(budget.router, prefix=settings.API_V1_STR)
 app.include_router(subscriptions.router, prefix=settings.API_V1_STR)
-app.include_router(apimatic_routes.router, prefix=settings.API_V1_STR)
+app.include_router(payments.router, prefix=settings.API_V1_STR)
 
 @app.get("/")
 async def root():
@@ -59,7 +60,7 @@ async def root():
         "version": settings.VERSION,
         "status": "online",
         "documentation": "/docs",
-        "apimatic_spec": "/api/apimatic/openapi.json",
+        "openapi_spec": "/openapi.json",
         "health_check": "/api/health"
     }
 
@@ -71,28 +72,31 @@ async def health_check():
         "version": settings.VERSION,
         "sponsors": {
             "channel3": {
-                "name": "Channel3 AI Commerce",
-                "status": "configured" if settings.CHANNEL3_API_KEY else "active (verified catalog mode)",
+                "name": "Channel3 product search",
+                "status": "configured" if (settings.CHANNEL3_API_KEY or "").strip() else "not configured",
                 "official_url": "https://www.channel3.ai/"
             },
             "ag_grid": {
                 "name": "AG Grid Enterprise Ready Tables",
                 "status": "active (Premium comparison dashboard enabled)",
                 "official_url": "https://www.ag-grid.com/"
-            },
-            "apimatic": {
-                "name": "APIMatic Developer Experience & SDKs",
-                "status": "active (OpenAPI 3.0 spec ready)",
-                "official_url": "https://www.apimatic.io/"
             }
         },
         "integrations": {
             "weather": "Open-Meteo Real-Time Weather API (Live)",
             "hotels": "MYMILE Verified Accommodations Provider (Live)",
-            "llm": f"Provider: {settings.LLM_PROVIDER} ({settings.LLM_MODEL_NAME})"
-        }
+            # What this process will actually use (no key material).
+            "llm": gemini_client.describe()
+        },
+        # What THIS running process loaded (no ids, no secrets). If it says
+        # false after editing backend/.env, the server was not restarted.
+        "payments": {
+            "paypal_configured": is_paypal_configured(),
+            "paypal_environment": settings.PAYPAL_ENVIRONMENT.strip().lower(),
+        },
     }
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("app.main:app", host="127.0.0.1", port=8000, reload=True)
+    # Also restart when backend/.env changes: settings are read once at startup.
+    uvicorn.run("app.main:app", host="127.0.0.1", port=8000, reload=True, reload_includes=[".env"])

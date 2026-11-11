@@ -4,7 +4,7 @@
 
 MYMILE is an intelligent travel companion and specialized travel e-commerce platform built for modern travelers. Rather than presenting generic search listings or isolated chat responses, MYMILE deploys an **AI Agent architecture with multi-tool calling** to understand traveler purpose, date constraints, weather forecasts, verified accommodations, and financial budgets.
 
-The platform balances comfort vs. cost, generates interactive comparison matrices using **AG Grid**, recommends authentic travel gear via **Channel3**, and exposes typed SDK workflows powered by **APIMatic**.
+The platform balances comfort vs. cost, generates interactive comparison matrices using **AG Grid**, and recommends authentic travel gear via **Channel3**.
 
 ---
 
@@ -21,7 +21,6 @@ The platform balances comfort vs. cost, generates interactive comparison matrice
 2. **Required Sponsor Integrations:**
    - **Channel3 (`https://www.channel3.ai/`):** Real-world travel essentials discovery engine. Recommends purpose-built travel gear (e.g. packable rain shells for Kyoto spring, Ihram towels and non-slip Tawaf slippers for Umrah, wide-brim sun hats for Giza Pyramids). Features live prices, authentic images, and verified partner purchase links.
    - **AG Grid (`https://www.ag-grid.com/`):** Powers the **Premium Comparison Dashboard**. Displays an interactive Hotel Matrix and Multi-Category Expense Breakdown with sorting, filtering, column resizing, and dynamic budget recalculation when swapping hotels.
-   - **APIMatic (`https://www.apimatic.io/`):** Transforms the MYMILE API into an APIMatic-compliant OpenAPI 3.0.3 specification, providing automated TypeScript & Python SDK generation and an interactive Developer Portal.
 
 3. **Subscription Tiers (Backend Enforced):**
    - **Free Plan ($0):** AI-generated personalized itinerary, hotel recommendations with estimated prices, live weather insights, Channel3 product recommendations, and baseline expense estimates. *External hotel booking links and AG Grid budget optimization are gated.*
@@ -42,7 +41,6 @@ flowchart TD
         AG1["AG Grid Hotel Comparison Table"]
         AG2["AG Grid Budget Breakdown Table"]
         Cart["Channel3 Shopping Cart Drawer"]
-        API_Modal["APIMatic SDK & OpenAPI Portal"]
     end
 
     subgraph Backend ["Backend (FastAPI + Pydantic v2)"]
@@ -66,7 +64,6 @@ flowchart TD
     subgraph ExternalServices ["External Providers & Sponsor Ecosystem"]
         S_C3["Channel3 AI Commerce API"]
         S_AG["AG Grid Enterprise Community Engine"]
-        S_APIM["APIMatic CodeGen & Validator API"]
         S_Weather["Open-Meteo Live API"]
         S_LLM["Google Gemini / OpenAI LLM"]
     end
@@ -83,7 +80,6 @@ flowchart TD
     T_Hotel --> Auth
     T_Product --> S_C3
     T_Budget --> AG2
-    Main --> S_APIM
     AgentEngine --> S_LLM
 ```
 
@@ -101,8 +97,7 @@ mymile/
 │   │   ├── components/
 │   │   │   ├── AgGridHotelComparison.tsx  # AG Grid Premium hotel matrix
 │   │   │   ├── AgGridBudgetTable.tsx      # AG Grid budget breakdown table
-│   │   │   ├── ShoppingCartDrawer.tsx     # Channel3 shopping bag slide-over
-│   │   │   └── ApimaticModal.tsx          # APIMatic SDK & OpenAPI code viewer
+│   │   │   └── ShoppingCartDrawer.tsx     # Channel3 shopping bag slide-over
 │   │   ├── services/
 │   │   │   └── api.ts                     # Axios client connecting all FastAPI endpoints
 │   │   ├── types/
@@ -133,8 +128,7 @@ mymile/
 │   │   │   ├── channel3_service.py        # Channel3 verified travel gear catalog & API
 │   │   │   ├── hotel_service.py           # Accommodations database & tier gating
 │   │   │   ├── places_service.py          # Tourist attractions & landmarks
-│   │   │   ├── budget_service.py          # Multi-variable budget optimization algorithm
-│   │   │   └── apimatic_service.py        # APIMatic OpenAPI transformation & SDK helper
+│   │   │   └── budget_service.py          # Multi-variable budget optimization algorithm
 │   │   ├── tools/
 │   │   │   ├── weather_tool.py            # Agent tool wrapper for weather
 │   │   │   ├── hotel_tool.py              # Agent tool wrapper for hotels
@@ -153,8 +147,7 @@ mymile/
 │   │           ├── places.py              # Tourist places endpoint
 │   │           ├── products.py            # Channel3 product discovery endpoint
 │   │           ├── budget.py              # Budget optimization endpoint
-│   │           ├── subscriptions.py       # Plan tiers & upgrade endpoints
-│   │           └── apimatic_routes.py     # APIMatic OpenAPI spec & SDK endpoints
+│   │           └── subscriptions.py       # Plan tiers & upgrade endpoints
 │   ├── requirements.txt
 │   ├── .env.example
 │   ├── .env
@@ -191,7 +184,7 @@ mymile/
 4. Access the interactive API documentation:
    - **Swagger UI:** [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)
    - **ReDoc:** [http://127.0.0.1:8000/redoc](http://127.0.0.1:8000/redoc)
-   - **APIMatic OpenAPI Spec:** [http://127.0.0.1:8000/api/apimatic/openapi.json](http://127.0.0.1:8000/api/apimatic/openapi.json)
+   - **OpenAPI Spec:** [http://127.0.0.1:8000/openapi.json](http://127.0.0.1:8000/openapi.json)
    - **Health Check:** [http://127.0.0.1:8000/api/health](http://127.0.0.1:8000/api/health)
 
 ---
@@ -222,7 +215,6 @@ All configuration is managed cleanly through `.env` files. Both `backend/.env` a
 | `GEMINI_API_KEY` | Google Gemini AI Model | Optional | [Google AI Studio](https://aistudio.google.com/) |
 | `OPENAI_API_KEY` | Alternative LLM provider | Optional | [OpenAI Platform](https://platform.openai.com/) |
 | `CHANNEL3_API_KEY` | Channel3 Commerce API | Optional | [Channel3 Developer Portal](https://www.channel3.ai/) (Pre-seeded with verified catalog fallback) |
-| `APIMATIC_API_KEY` | APIMatic Validation API | Optional | [APIMatic Portal](https://www.apimatic.io/) (Spec endpoint `/api/apimatic/openapi.json` is always live) |
 | `WEATHER_API_KEY` | Weather provider | Optional | Default uses Open-Meteo (100% free, real live weather, no key needed) |
 | `SECRET_KEY` | JWT token encryption | Yes | Pre-configured with hackathon development secret |
 
@@ -257,11 +249,6 @@ When demonstrating MYMILE to judges and attendees, follow this 5-minute showcase
    - Click **"+ Add to Cart"** on a Universal Adapter or Rain Shell.
    - Open the **Travel Bag Drawer**, adjust quantities, and click **"Proceed to Partner Checkout ↗"** to showcase legitimate partner links.
 
-6. **Sponsor Feature 3: APIMatic SDK & Developer Hub:**
-   - In the header or footer, click **"APIMatic SDKs"**.
-   - Show the auto-generated **TypeScript SDK** and **Python SDK** snippets.
-   - Demonstrate the live APIMatic-compliant OpenAPI 3.0 specification at `/api/apimatic/openapi.json`.
-
-7. **Free vs. Premium Plan Toggle:**
+6. **Free vs. Premium Plan Toggle:**
    - In the top header, click the **"PREMIUM PLAN"** badge to instantly toggle to **"FREE PLAN"**.
    - Observe how hotel external booking links and AG Grid budget optimization are immediately disabled, proving strict backend-enforced tier governance.

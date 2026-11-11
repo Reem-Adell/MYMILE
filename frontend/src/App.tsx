@@ -1,4 +1,4 @@
-import { useMemo, useState, useEffect, useRef } from "react";
+import { useMemo, useState, useEffect, useRef, useCallback } from "react";
 import logo from "./assets/mymile-logo.png";
 import egyptTravelImage from "./imports/20__Europe_Travel_Bucket_List_Tips_You_Need_for_an_Unforgettable_Adventure.jpg";
 import editorHeroImage from "./imports/editor-hero-egypt.jpg";
@@ -7,9 +7,87 @@ import signupImage from "./imports/download__2_.jpg";
 import { AgGridHotelComparison } from "./components/AgGridHotelComparison";
 import { AgGridBudgetTable } from "./components/AgGridBudgetTable";
 import { ShoppingCartDrawer } from "./components/ShoppingCartDrawer";
-import { ApimaticModal } from "./components/ApimaticModal";
-import { api, getStoredToken, getStoredUser, getErrorMessage } from "./services/api";
-import { TripPlan, Hotel, Product, CartItem, User, BudgetBreakdown } from "./types";
+import { PremiumCheckout } from "./components/PremiumCheckout";
+import { SessionExpiredError } from "./services/payments";
+import { api, getStoredToken, getStoredUser, getErrorMessage, updateStoredUser } from "./services/api";
+import { TripPlan, Hotel, HotelOffers, ItineraryDay, Product, CartItem, User, BudgetBreakdown, PremiumTerms, DestinationImage } from "./types";
+import {
+  TripRequest,
+  StoredTrips,
+  accountKey,
+  browserStore,
+  getActiveTrip,
+  loadTrips,
+  newTripId,
+  saveTrip,
+  setActiveTrip,
+  toPlanPayload,
+} from "./services/tripStore";
+import {
+  bookingView,
+  canShowBudget,
+  formatMoney,
+  heroLocation,
+  isLiveHotel,
+  isPremiumView,
+  mergeOffers,
+  needsOffers,
+  offersRequest,
+  otherOffers,
+  PRICE_VARIES_NOTE,
+  bookingPriceLine,
+  priceDisclaimer,
+  priceMeta,
+  priceView,
+  showsEstimateLabel,
+} from "./services/exploreView";
+
+// Subtle "Estimated" tag shown next to hotel prices; the tooltip explains why.
+function EstimatedLabel() {
+  return (
+    <span className="price-est" title={PRICE_VARIES_NOTE}>
+      Estimated
+    </span>
+  );
+}
+import { BudgetImpact, applyHotelSelection } from "./services/hotelComparison";
+import { availabilityLabel, buyLink, essentialsEmptyMessage, productPrice, productSource } from "./services/productView";
+import {
+  DEFAULT_SUGGESTIONS,
+  aiPlanLabel,
+  applyItineraryChanges,
+  buildChatContext,
+  recentHistory,
+  suggestedHotel,
+  toolList,
+} from "./services/assistantChat";
+
+// Trip fields entered in Plan a Trip (id/created_at are added when saved).
+type TripInput = Omit<TripRequest, "id" | "created_at">;
+
+// "$9" for 9.00 USD, "$9.50" for 9.50 USD, "€9" for EUR... (display only).
+function formatPremiumPrice(terms: PremiumTerms | null): string {
+  if (!terms) return "…";
+  const value = Number(terms.price);
+  try {
+    return new Intl.NumberFormat("en-US", {
+      style: "currency",
+      currency: terms.currency,
+      minimumFractionDigits: Number.isInteger(value) ? 0 : 2,
+      maximumFractionDigits: 2,
+    }).format(value);
+  } catch {
+    return `${terms.price} ${terms.currency}`;
+  }
+}
+
+function formatExpiry(iso?: string | null): string {
+  if (!iso) return "";
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime())
+    ? iso
+    : d.toLocaleDateString(undefined, { year: "numeric", month: "long", day: "numeric" });
+}
 
 type View =
   | "home"
@@ -342,10 +420,16 @@ const features = [
   ["cloud", "Weather-wise plans", "Daily forecasts shape your itinerary and packing list."],
   ["bag", "Travel essentials", "Smart product picks via Channel3 for your destination & season."],
   ["wallet", "Budget optimization", "See where every dollar goes and make confident trade-offs."],
-  ["route", "One connected journey", "Interactive AG Grid dashboards and APIMatic developer APIs."],
+  ["route", "One connected journey", "Interactive AG Grid dashboards to compare stays and budgets."],
 ] as [IconName, string, string][];
 
-function Home({ go, onOpenApimatic }: { go: (v: View) => void; onOpenApimatic: () => void }) {
+function Home({
+  go,
+  premiumTerms,
+}: {
+  go: (v: View) => void;
+  premiumTerms: PremiumTerms | null;
+}) {
   return (
     <main>
       <section className="hero">
@@ -375,12 +459,6 @@ function Home({ go, onOpenApimatic }: { go: (v: View) => void; onOpenApimatic: (
                 }
               >
                 Explore features
-              </button>
-              <button
-                className="btn btn-light"
-                onClick={onOpenApimatic}
-              >
-                APIMatic SDKs <Icon name="code" size={16} />
               </button>
             </div>
             <div className="trust-row">
@@ -436,7 +514,7 @@ function Home({ go, onOpenApimatic }: { go: (v: View) => void; onOpenApimatic: (
           <i />
           <span>Powered by smart travel AI</span>
           <i />
-          <span>Integrated with Channel3, AG Grid & APIMatic</span>
+          <span>Integrated with Channel3 & AG Grid</span>
         </div>
       </section>
 
@@ -557,7 +635,8 @@ function Home({ go, onOpenApimatic }: { go: (v: View) => void; onOpenApimatic: (
                 <Icon name="spark" size={14} /> PREMIUM
               </span>
               <b>
-                $9<small>/month</small>
+                {formatPremiumPrice(premiumTerms)}
+                <small>{premiumTerms ? ` / ${premiumTerms.duration_days} days · one-time` : ""}</small>
               </b>
             </div>
             {[
@@ -602,14 +681,6 @@ function toDateInputValue(d: Date) {
   return `${y}-${m}-${day}`;
 }
 
-const CURRENCIES = [
-  { code: "USD", label: "USD ($)", symbol: "$" },
-  { code: "EUR", label: "EUR (€)", symbol: "€" },
-  { code: "GBP", label: "GBP (£)", symbol: "£" },
-  { code: "EGP", label: "EGP (E£)", symbol: "E£" },
-  { code: "SAR", label: "SAR (﷼)", symbol: "﷼" },
-];
-
 // Keep the traveler count a whole number between 1 and 50.
 function clampTravelers(value: string) {
   const n = parseInt(value, 10);
@@ -624,12 +695,16 @@ function Planner({
   userPlan,
 }: {
   go: (v: View) => void;
-  onGeneratePlan: (data: any) => Promise<void>;
+  onGeneratePlan: (data: TripInput) => Promise<boolean>;
   isLoading: boolean;
   userPlan: 'free' | 'premium';
 }) {
   const [step, setStep] = useState(1);
-  const [destination, setDestination] = useState("Kyoto, Japan");
+  // City and Country are separate, required fields: they are the authoritative
+  // location for hotels, weather and the itinerary.
+  const [city, setCity] = useState("");
+  const [country, setCountry] = useState("");
+  const step1Missing = !city.trim() || !country.trim();
   const [departureDate, setDepartureDate] = useState(() => toDateInputValue(new Date()));
   const [returnDate, setReturnDate] = useState(() => {
     const d = new Date();
@@ -641,9 +716,19 @@ function Planner({
   const [stayPreference, setStayPreference] = useState("Boutique hotel");
   const [priorities, setPriorities] = useState<string[]>(["Local culture", "Great food", "Slow pace"]);
   const [notes, setNotes] = useState("");
-  const [premiumOptim, setPremiumOptim] = useState(userPlan === "premium");
+  // Budget optimization is a Premium feature. For Free accounts it is always off
+  // (whatever was chosen before), and clicking it opens the Pricing page instead.
+  const isPremiumUser = userPlan === "premium";
+  const [premiumChoice, setPremiumOptim] = useState(true);
+  const premiumOptim = isPremiumUser && premiumChoice;
+  const handleOptimToggle = () => {
+    if (!isPremiumUser) {
+      go("pricing");
+      return;
+    }
+    setPremiumOptim(!premiumOptim);
+  };
   const [budgetVal, setBudgetVal] = useState("4500");
-  const [currency, setCurrency] = useState("USD");
 
   const titles = ["Where are you headed?", "Who’s coming along?", "Make it feel like you"];
 
@@ -656,19 +741,22 @@ function Planner({
   };
 
   const handleFinish = async () => {
+    const c = city.trim();
+    const k = country.trim();
     await onGeneratePlan({
-      destination,
+      destination: `${c}, ${k}`,
+      destination_city: c,
+      destination_country: k,
       departure_date: departureDate,
       return_date: returnDate,
       travelers: clampTravelers(travelers),
       purpose,
       stay_preference: stayPreference,
       priorities,
-      notes,
-      plan: premiumOptim ? "premium" : "free",
+      notes: notes.trim(), // preferences only; never used as the destination
       total_budget: premiumOptim ? parseFloat(budgetVal.replace(/,/g, "")) || 4500 : undefined,
     });
-    go("results");
+    go("results"); // Explore shows loading / error / the new trip
   };
 
   return (
@@ -699,20 +787,39 @@ function Planner({
         <div className="planner-card">
           {step === 1 && (
             <div className="form-grid">
-              <label className="field full">
+              <label className="field">
                 <span>
-                  Destination <b>*</b>
+                  Destination city <b>*</b>
                 </span>
                 <div className="input-wrap">
                   <Icon name="pin" />
                   <input
-                    value={destination}
-                    onChange={(e) => setDestination(e.target.value)}
-                    placeholder="e.g. Kyoto, Paris, Cairo, Makkah"
+                    value={city}
+                    onChange={(e) => setCity(e.target.value)}
+                    placeholder="e.g. Cairo"
+                    autoComplete="address-level2"
+                    required
                   />
                 </div>
-                <small>Try: Kyoto, Japan · Paris, France · Cairo, Egypt · Makkah, Saudi Arabia</small>
               </label>
+              <label className="field">
+                <span>
+                  Country <b>*</b>
+                </span>
+                <div className="input-wrap">
+                  <Icon name="pin" />
+                  <input
+                    value={country}
+                    onChange={(e) => setCountry(e.target.value)}
+                    placeholder="e.g. Egypt"
+                    autoComplete="country-name"
+                    required
+                  />
+                </div>
+              </label>
+              <small className="field full planner-hint">
+                Try: Cairo, Egypt · Alexandria, Egypt · Kyoto, Japan · Paris, France · Makkah, Saudi Arabia
+              </small>
               <label className="field">
                 <span>
                   Departure date <b>*</b>
@@ -847,41 +954,39 @@ function Planner({
                   </span>
                   <div>
                     <b>Optimize around my budget</b>
-                    <small>Premium feature · Balance comfort and cost automatically</small>
+                    <small>
+                      {isPremiumUser
+                        ? "Premium feature · Balance comfort and cost automatically"
+                        : "Premium feature · Upgrade to unlock budget optimization"}
+                    </small>
                   </div>
                 </div>
                 <button
                   type="button"
                   className={premiumOptim ? "switch on" : "switch"}
-                  onClick={() => setPremiumOptim(!premiumOptim)}
+                  onClick={handleOptimToggle}
+                  role="switch"
+                  aria-checked={premiumOptim}
+                  aria-label={isPremiumUser ? "Optimize around my budget" : "Upgrade to Premium to optimize around your budget"}
+                  title={isPremiumUser ? undefined : "Premium feature: see plans"}
                 >
                   <i />
                 </button>
               </label>
 
               {premiumOptim && (
-                <div className="budget-row">
+                <div className="budget-row single">
                   <label className="field">
-                    <span>Total travel budget</span>
+                    <span>
+                      Total travel budget <em>in US dollars (USD)</em>
+                    </span>
                     <div className="input-wrap">
-                      <b>{CURRENCIES.find((c) => c.code === currency)?.symbol}</b>
+                      <b>$</b>
                       <input
                         value={budgetVal}
                         onChange={(e) => setBudgetVal(e.target.value)}
                         placeholder="e.g. 1500 or 4500"
                       />
-                    </div>
-                  </label>
-                  <label className="field">
-                    <span>Currency</span>
-                    <div className="input-wrap">
-                      <select value={currency} onChange={(e) => setCurrency(e.target.value)}>
-                        {CURRENCIES.map((c) => (
-                          <option key={c.code} value={c.code}>
-                            {c.label}
-                          </option>
-                        ))}
-                      </select>
                     </div>
                   </label>
                 </div>
@@ -895,15 +1000,18 @@ function Planner({
                 ? "Required fields are marked with *"
                 : "Your travel preferences guide our AI Agent tools."}
             </span>
+            {/* Steps 1-2 only move forward ("Next"); planning (and its "thinking" state) belongs to the
+                last step. isLoading is also true while a saved trip re-plans in the background. */}
             <button
               className="btn btn-primary"
-              disabled={isLoading}
+              disabled={(step === 3 && isLoading) || (step === 1 && step1Missing)}
+              title={step === 1 && step1Missing ? "Enter a destination city and country" : undefined}
               onClick={() => (step < 3 ? setStep(step + 1) : handleFinish())}
             >
-              {isLoading ? (
+              {step < 3 ? (
+                <>Next <Icon name="arrow" size={17} /></>
+              ) : isLoading ? (
                 <span>AI Agent thinking...</span>
-              ) : step < 3 ? (
-                <>Continue <Icon name="arrow" size={17} /></>
               ) : (
                 <>Create my travel plan <Icon name="spark" size={17} /></>
               )}
@@ -950,6 +1058,151 @@ const BUDGET_PARTS: { key: keyof BudgetBreakdown; label: string; color: string }
   { key: "contingency_and_other", label: "Extras", color: "#dde7ff" },
 ];
 
+// Destination hero photos, cached for the browser session (the backend caches
+// too), so re-rendering or revisiting Explore never re-requests the same city.
+const destinationImageCache = new Map<string, DestinationImage | null>();
+
+function useDestinationImage(city: string, country: string) {
+  const key = `${city.toLowerCase()}|${country.toLowerCase()}`;
+  const [image, setImage] = useState<DestinationImage | null>(() => destinationImageCache.get(key) ?? null);
+  useEffect(() => {
+    if (!city) {
+      setImage(null);
+      return;
+    }
+    if (destinationImageCache.has(key)) {
+      setImage(destinationImageCache.get(key) ?? null);
+      return;
+    }
+    let cancelled = false;
+    setImage(null);
+    api
+      .getDestinationImage(city, country)
+      .then((img) => {
+        destinationImageCache.set(key, img);
+        if (!cancelled) setImage(img);
+      })
+      .catch(() => {
+        if (!cancelled) setImage(null); // network error: fallback now, retry on a later visit
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [key, city, country]);
+  // The photo itself failed to load: remember that and show the fallback.
+  const onError = () => {
+    destinationImageCache.set(key, null);
+    setImage(null);
+  };
+  return { image, onError };
+}
+
+function ExploreEmpty({ go }: { go: (v: View) => void }) {
+  return (
+    <main className="app-bg explore">
+      <section className="ex-empty page-shell">
+        <span className="icon-box yellow">
+          <Icon name="pin" />
+        </span>
+        <span className="kicker">EXPLORE</span>
+        <h1>Your next journey starts with a plan.</h1>
+        <p>
+          Tell MYMILE where you're headed and when. Your stay, day-by-day itinerary, weather and
+          essentials will appear here for that trip.
+        </p>
+        <button className="btn btn-yellow" onClick={() => go("plan")}>
+          Plan Your Miles, Discover Your Smile <Icon name="arrow" size={16} />
+        </button>
+      </section>
+    </main>
+  );
+}
+
+function ExploreStatus({
+  status,
+  message,
+  onRetry,
+  go,
+}: {
+  status: "loading" | "error";
+  message?: string;
+  onRetry?: () => void;
+  go: (v: View) => void;
+}) {
+  return (
+    <main className="app-bg explore">
+      <section className="ex-empty page-shell" aria-live="polite">
+        {status === "loading" ? (
+          <>
+            <span className="ex-spinner" aria-hidden="true" />
+            <h1>Preparing your trip…</h1>
+            <p>Checking the weather, stays and itinerary for your destination.</p>
+          </>
+        ) : (
+          <>
+            <span className="icon-box yellow">
+              <Icon name="cloud" />
+            </span>
+            <h1>We couldn't load your trip.</h1>
+            <p>{message || "Please check your connection and try again."}</p>
+            <div className="ex-empty-actions">
+              {onRetry && (
+                <button className="btn btn-primary" onClick={onRetry}>
+                  Try again
+                </button>
+              )}
+              <button className="btn btn-secondary" onClick={() => go("plan")}>
+                Plan a trip
+              </button>
+            </div>
+          </>
+        )}
+      </section>
+    </main>
+  );
+}
+
+// What switching hotels did to the Premium budget. Uses only the hotels' totals and
+// the recalculated budget; nothing is shown that the data doesn't contain.
+function BudgetImpactSummary({ impact }: { impact: BudgetImpact }) {
+  const cur = impact.currency;
+  const total = (v: number | null) => (v == null ? "Price not listed" : formatMoney(v, cur));
+  const delta =
+    impact.direction === "increase" ? `+${formatMoney(impact.difference ?? 0, cur)}`
+      : impact.direction === "decrease" ? `−${formatMoney(Math.abs(impact.difference ?? 0), cur)}`
+        : impact.direction === "same" ? "No change" : null;
+  return (
+    <div className={`ex-impact ${impact.direction}`} role="status" aria-live="polite">
+      <div className="ex-impact-main">
+        <span className="ex-impact-label">Budget impact</span>
+        <span className="ex-impact-change">
+          {impact.previousName && (
+            <>
+              <s title={impact.previousName}>{total(impact.previousTotal)}</s>
+              <Icon name="arrow" size={13} />
+            </>
+          )}
+          <b title={impact.nextName}>{total(impact.nextTotal)}</b>
+          {delta && <em>{delta}</em>}
+        </span>
+      </div>
+      <div className="ex-impact-meta">
+        <span>
+          {impact.previousName ? `${impact.previousName} → ${impact.nextName}` : impact.nextName}
+        </span>
+        {impact.direction === "unknown" ? (
+          <span>Budget unchanged: no listed price for this hotel.</span>
+        ) : impact.remaining != null ? (
+          <span className={impact.remaining < 0 ? "over" : undefined}>
+            {impact.remaining < 0 ? "Over budget by " : "Remaining "}
+            {formatMoney(Math.abs(impact.remaining), cur)}
+          </span>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
 function Results({
   plan,
   go,
@@ -957,6 +1210,7 @@ function Results({
   userPlan,
   onSelectHotel,
   selectedHotel,
+  budgetImpact,
 }: {
   plan: TripPlan;
   go: (v: View) => void;
@@ -964,28 +1218,60 @@ function Results({
   userPlan: "free" | "premium";
   onSelectHotel: (h: Hotel) => void;
   selectedHotel: Hotel | null;
+  budgetImpact: BudgetImpact | null;
 }) {
   const [openDays, setOpenDays] = useState<number[]>([1]);
   const [showAgGrid, setShowAgGrid] = useState<boolean>(true);
   const [added, setAdded] = useState<string | null>(null);
 
-  const activeHotel = selectedHotel || plan.recommended_hotel;
-  const isPremium = plan.is_premium || userPlan === "premium";
-  const budget = plan.budget_breakdown;
+  const baseHotel = selectedHotel || plan.recommended_hotel;
+  // Premium = backend says Premium now (GET /auth/me, expiry-aware) AND this plan
+  // was generated for Premium. Expired/stale Premium behaves as Free.
+  const isPremium = isPremiumView(userPlan, plan);
+
+  // Live hotels (Google Hotels via SerpApi): provider booking links are fetched
+  // once per hotel, only for Premium, only for the hotel being shown. The backend
+  // caches them, so this never costs more than one SerpApi search per hotel/stay.
+  const [offers, setOffers] = useState<Record<string, HotelOffers | "loading" | "error">>({});
+  const offersState = offers[baseHotel.id];
+  const wantsOffers = needsOffers(baseHotel, isPremium);
+  useEffect(() => {
+    if (!wantsOffers || offersState !== undefined) return;
+    const id = baseHotel.id;
+    setOffers((prev) => ({ ...prev, [id]: "loading" }));
+    api
+      .getHotelOffers(offersRequest(plan, baseHotel))
+      .then((res) => setOffers((prev) => ({ ...prev, [id]: res })))
+      .catch(() => setOffers((prev) => ({ ...prev, [id]: "error" })));
+  }, [wantsOffers, offersState, baseHotel, plan]);
+  const loadedOffers = offersState && typeof offersState === "object" ? offersState : null;
+  const activeHotel = mergeOffers(baseHotel, loadedOffers);
+  const liveHotel = isLiveHotel(activeHotel);
+  // Budget Snapshot + Estimated Cost exist only for Premium (Free never receives the data).
+  const showBudget = canShowBudget(userPlan, plan);
+  const budget = showBudget ? plan.budget_breakdown : null;
   const nights = plan.total_days;
   const allOpen = openDays.length === plan.itinerary.length;
-  const isEgypt = /egypt|cairo|giza|luxor|aswan/i.test(plan.destination);
-
-  const budgetParts = BUDGET_PARTS.map((p) => ({ ...p, value: Number(budget[p.key]) || 0 })).filter(
-    (p) => p.value > 0
-  );
-  const partsTotal = budgetParts.reduce((s, p) => s + p.value, 0) || 1;
-  const userBudget = budget.user_budget || null;
-  const usedPct = userBudget ? Math.min(100, Math.round((budget.total_estimated / userBudget) * 100)) : null;
-  const remaining = budget.remaining_balance ?? (userBudget ? userBudget - budget.total_estimated : null);
-  const overBudget = remaining !== null && remaining < 0;
   // Must match GUESTS_PER_ROOM in the backend hotel service.
   const rooms = Math.max(1, Math.ceil(plan.travelers / 2));
+  const price = priceView(activeHotel, nights, rooms);
+  const booking = isPremium ? bookingView(activeHotel) : null;
+
+  const budgetParts = budget
+    ? BUDGET_PARTS.map((p) => ({ ...p, value: Number(budget[p.key]) || 0 })).filter((p) => p.value > 0)
+    : [];
+  const partsTotal = budgetParts.reduce((s, p) => s + p.value, 0) || 1;
+  const userBudget = budget?.user_budget || null;
+  const usedPct = budget && userBudget ? Math.min(100, Math.round((budget.total_estimated / userBudget) * 100)) : null;
+  const remaining = budget ? budget.remaining_balance ?? (userBudget ? userBudget - budget.total_estimated : null) : null;
+  const overBudget = remaining !== null && remaining < 0;
+
+  // Hero: a real, verified photo of THIS destination (backend: Wikipedia /
+  // Wikimedia Commons, cached), else a branded fallback. Never a random image.
+  const { city: heroCity, country: heroCountry } = heroLocation(plan);
+  const hero = useDestinationImage(heroCity, heroCountry);
+  // The bundled hero photo shows Cairo/Giza: a valid fallback for Cairo only.
+  const cairoPhoto = /^(cairo|giza)$/i.test(heroCity) ? editorHeroImage : null;
 
   const toggleDay = (n: number) =>
     setOpenDays((prev) => (prev.includes(n) ? prev.filter((d) => d !== n) : [...prev, n]));
@@ -1002,14 +1288,26 @@ function Results({
   return (
     <main className="app-bg explore">
       {/* ---------- Hero ---------- */}
-      <section className="ex-hero page-shell">
-        <img src={isEgypt ? editorHeroImage : heroImage} alt={plan.destination} />
+      <section className={`ex-hero page-shell${hero.image || cairoPhoto ? "" : " ex-hero-fallback"}`}>
+        {hero.image ? (
+          <img src={hero.image.url} alt={`${plan.destination}`} onError={hero.onError} />
+        ) : cairoPhoto ? (
+          <img src={cairoPhoto} alt={`${plan.destination}`} />
+        ) : null}
+        {hero.image?.page_url && (
+          <a className="ex-hero-credit" href={hero.image.page_url} target="_blank" rel="noopener noreferrer">
+            Photo: {hero.image.source}
+          </a>
+        )}
         <div className="ex-hero-content">
           <span className="status-pill">
             <i /> YOUR PLAN IS READY · {isPremium ? "PREMIUM OPTIMIZED" : "FREE PLAN"}
           </span>
           <h1>{plan.destination}</h1>
           {plan.destination_summary && <p className="ex-hero-summary">{plan.destination_summary}</p>}
+          <p className={`ex-ai-note ${aiPlanLabel(plan.ai).kind}`}>
+            <Icon name="spark" size={14} /> {aiPlanLabel(plan.ai).text}
+          </p>
           <div className="ex-hero-chips">
             <span>
               <Icon name="calendar" size={16} /> {formatTripDates(plan.departure_date, plan.return_date)}
@@ -1064,18 +1362,20 @@ function Results({
                   <em>{plan.weather.current_condition}</em>
                 </div>
               </div>
-              <div className="ex-stat">
-                <span className="icon-box yellow">
-                  <Icon name="wallet" />
-                </span>
-                <div>
-                  <small>Estimated cost</small>
-                  <b>{money(budget.total_estimated)}</b>
-                  <em className={overBudget ? "bad" : "good"}>
-                    {overBudget ? "Over budget" : budget.status.replace(/_/g, " ")}
-                  </em>
+              {budget && (
+                <div className="ex-stat">
+                  <span className="icon-box yellow">
+                    <Icon name="wallet" />
+                  </span>
+                  <div>
+                    <small>Estimated cost</small>
+                    <b>{formatMoney(budget.total_estimated, budget.currency)}</b>
+                    <em className={overBudget ? "bad" : "good"}>
+                      {overBudget ? "Over budget" : budget.status.replace(/_/g, " ")}
+                    </em>
+                  </div>
                 </div>
-              </div>
+              )}
             </div>
 
             {plan.weather.forecast?.length > 0 && (
@@ -1125,71 +1425,107 @@ function Results({
               )}
             </div>
 
-            <article className="ex-card ex-hotel">
+            <article className={`ex-card ex-hotel${activeHotel.is_placeholder ? " placeholder" : ""}`}>
               <div className="ex-hotel-img">
-                <img src={activeHotel.image_url} alt={activeHotel.name} />
-                <span className="ex-badge">
-                  <Icon name="spark" size={13} /> BEST MATCH
-                </span>
+                <img src={activeHotel.image_url} alt={activeHotel.is_placeholder ? "" : activeHotel.name} />
+                {!activeHotel.is_placeholder && activeHotel.is_best_match && (
+                  <span className="ex-badge">
+                    <Icon name="spark" size={13} /> BEST MATCH
+                  </span>
+                )}
+                {activeHotel.image_is_illustrative && (
+                  <span className="ex-photo-note">Illustrative photo, not this property</span>
+                )}
               </div>
               <div className="ex-hotel-body">
                 <div className="ex-hotel-top">
-                  <span className="ex-chip">{activeHotel.category}</span>
+                  <span className="ex-hotel-kind">{activeHotel.category}</span>
                   {activeHotel.rating > 0 && (
                     <span className="ex-rating">
-                      <Icon name="star" size={15} /> {activeHotel.rating}
+                      <Icon name="star" size={14} /> {activeHotel.rating}
                       {activeHotel.reviews_count ? (
-                        <small> ({activeHotel.reviews_count.toLocaleString()} reviews)</small>
+                        <small>({activeHotel.reviews_count.toLocaleString()})</small>
                       ) : null}
                     </span>
                   )}
                 </div>
                 <h3>{activeHotel.name}</h3>
                 <p className="ex-muted">
-                  <Icon name="pin" size={15} /> {activeHotel.location}
+                  <Icon name="pin" size={14} /> {activeHotel.location}
                 </p>
-                <div className="ex-amenities">
-                  {activeHotel.amenities.slice(0, 4).map((a) => (
-                    <span key={a}>
-                      <Icon name="check" size={13} /> {a}
-                    </span>
-                  ))}
-                </div>
-                <blockquote>“{activeHotel.best_match_reason}”</blockquote>
+                {activeHotel.amenities.length > 0 && (
+                  <p className="ex-amenity-line">{activeHotel.amenities.slice(0, 4).join(" · ")}</p>
+                )}
+                <p className="ex-hotel-why">{activeHotel.best_match_reason}</p>
+
                 <div className="ex-hotel-foot">
-                  <div>
+                  <div className="ex-price">
+                    <div className="ex-price-total">
+                      <b>{price.total}</b>
+                      {showsEstimateLabel(price) && <EstimatedLabel />}
+                    </div>
                     <small>
-                      {activeHotel.price_source === "live" ? "" : "Est. "}
-                      {money(activeHotel.price_per_night)} / room / night · {nights} night
-                      {nights === 1 ? "" : "s"}
-                      {rooms > 1 ? ` · ${rooms} rooms` : ""}
+                      {price.nightly} · {price.details}
                     </small>
-                    <b>{money(activeHotel.total_price)}</b>
-                    {activeHotel.price_source === "live" ? (
-                      <small className="ex-price-note live">
-                        <Icon name="check" size={12} /> Live price for your dates
-                        {activeHotel.price_provider ? ` from ${activeHotel.price_provider}` : ""}
-                      </small>
-                    ) : (
-                      <small className="ex-price-note">
-                        Estimate. The live price for your dates shows on Booking.com.
+                    {priceMeta(activeHotel, price) && (
+                      <small className="ex-price-meta" title={`${price.totalLabel}. ${price.note}`}>
+                        {priceMeta(activeHotel, price)}
                       </small>
                     )}
                   </div>
-                  {isPremium && activeHotel.booking_link ? (
-                    <a
-                      href={activeHotel.booking_link}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="btn btn-primary"
-                    >
-                      See live price & book <Icon name="arrow" size={16} />
-                    </a>
-                  ) : !isPremium ? (
+                  {booking ? (
+                    <div className="ex-booking">
+                      <a
+                        href={booking.href}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="btn btn-primary"
+                        title={booking.note}
+                      >
+                        {booking.label} <Icon name="arrow" size={16} />
+                      </a>
+                      {bookingPriceLine(activeHotel) && <small>{bookingPriceLine(activeHotel)}</small>}
+                      {otherOffers(activeHotel).length > 0 && (
+                        <small className="ex-other-offers">
+                          Also on{" "}
+                          {otherOffers(activeHotel).map((o, i) => (
+                            <span key={o.provider}>
+                              {i > 0 && " · "}
+                              <a href={o.url!} target="_blank" rel="noopener noreferrer"
+                                 title={o.price_per_night != null ? PRICE_VARIES_NOTE : undefined}>
+                                {o.provider}
+                                {o.price_per_night != null && ` ${formatMoney(o.price_per_night, o.currency)}`}
+                              </a>
+                            </span>
+                          ))}
+                        </small>
+                      )}
+                    </div>
+                  ) : isPremium && liveHotel && !activeHotel.is_placeholder ? (
+                    <div className="ex-booking">
+                      {offersState === "loading" ? (
+                        <small className="ex-booking-status">Checking booking sites…</small>
+                      ) : (
+                        <small className="ex-booking-status" title={loadedOffers?.message || undefined}>
+                          No direct booking link available for this hotel.
+                        </small>
+                      )}
+                    </div>
+                  ) : !isPremium && !(liveHotel && activeHotel.is_placeholder) ? (
                     <button className="btn btn-secondary" onClick={() => go("pricing")}>
                       <Icon name="spark" size={15} /> Unlock booking link
                     </button>
                   ) : null}
+                </div>
+
+                <div className="ex-hotel-fine">
+                  {isPremium && activeHotel.official_website && (
+                    <a href={activeHotel.official_website} target="_blank" rel="noopener noreferrer"
+                       title="The hotel's own website (not a booking provider)">
+                      Hotel website <Icon name="arrow" size={12} />
+                    </a>
+                  )}
+                  <p>{priceDisclaimer(activeHotel)}</p>
                 </div>
               </div>
             </article>
@@ -1208,12 +1544,19 @@ function Results({
                   isPremium={isPremium}
                   totalNights={nights}
                 />
-                <div className="ex-grid-head second">
-                  <span className="kicker">WHERE YOUR MONEY GOES</span>
-                  <h3>Expense analytics</h3>
-                  <p>Each category balanced by the MYMILE budget agent.</p>
-                </div>
-                <AgGridBudgetTable breakdown={budget} userBudget={budget.user_budget || undefined} />
+                {budget && budgetImpact && budgetImpact.tripId === plan.trip_id && (
+                  <BudgetImpactSummary impact={budgetImpact} />
+                )}
+                {budget && (
+                  <>
+                    <div className="ex-grid-head second">
+                      <span className="kicker">WHERE YOUR MONEY GOES</span>
+                      <h3>Expense analytics</h3>
+                      <p>Each category balanced by the MYMILE budget agent.</p>
+                    </div>
+                    <AgGridBudgetTable breakdown={budget} userBudget={budget.user_budget || undefined} />
+                  </>
+                )}
               </div>
             )}
           </section>
@@ -1298,21 +1641,29 @@ function Results({
                   Travel <span>essentials.</span>
                 </h2>
               </div>
-              <button className="ex-link" onClick={() => go("shop")}>
-                View all {plan.travel_essentials.length} <Icon name="arrow" size={15} />
-              </button>
+              {plan.travel_essentials.length > 3 && (
+                <button className="ex-link" onClick={() => go("shop")}>
+                  View all {plan.travel_essentials.length} <Icon name="arrow" size={15} />
+                </button>
+              )}
             </div>
+            {plan.travel_essentials.length === 0 && (
+              <p className="ex-products-empty">{essentialsEmptyMessage(plan.essentials)}</p>
+            )}
             <div className="ex-products">
               {plan.travel_essentials.slice(0, 3).map((prod) => (
                 <article key={prod.id} className="ex-card ex-product">
-                  <img src={prod.image_url} alt={prod.name} />
+                  <ProductImage product={prod} />
                   <div>
-                    <span className="ex-product-cat">{prod.category}</span>
+                    {productSource(prod) && <span className="ex-product-cat">{productSource(prod)}</span>}
                     <h4>{prod.name}</h4>
-                    <p>{prod.reason}</p>
+                    {prod.reason && <p>{prod.reason}</p>}
                   </div>
                   <div className="ex-product-foot">
-                    <b>${prod.price}</b>
+                    <b>
+                      {productPrice(prod)}
+                      {availabilityLabel(prod) && <small className="ex-product-stock">{availabilityLabel(prod)}</small>}
+                    </b>
                     <button
                       className={`btn btn-yellow btn-small${added === prod.id ? " done" : ""}`}
                       onClick={() => handleAdd(prod)}
@@ -1334,16 +1685,17 @@ function Results({
 
         {/* ---------- Sidebar ---------- */}
         <aside className="ex-aside">
+          {budget && (
           <div className="ex-card ex-budget">
             <div className="ex-budget-head">
               <h3>Budget snapshot</h3>
               <span className={overBudget ? "bad" : "good"}>
-                {overBudget ? "Over budget" : isPremium ? "Optimized" : "Estimate"}
+                {overBudget ? "Over budget" : "Optimized"}
               </span>
             </div>
             <div className="ex-budget-total">
               <small>Estimated total</small>
-              <b>{money(budget.total_estimated)}</b>
+              <b>{formatMoney(budget.total_estimated, budget.currency)}</b>
               {userBudget && (
                 <span>
                   of {money(userBudget)} budget · {usedPct}% used
@@ -1375,16 +1727,11 @@ function Results({
                 <b>{money(Math.abs(remaining))}</b>
               </div>
             )}
-            {!isPremium ? (
-              <button className="ex-link" onClick={() => go("pricing")}>
-                Unlock budget optimization <Icon name="arrow" size={15} />
-              </button>
-            ) : (
-              <p className="ex-premium-note">
-                <Icon name="check" size={15} /> Premium budget optimizer active
-              </p>
-            )}
+            <p className="ex-premium-note">
+              <Icon name="check" size={15} /> Premium budget optimizer active
+            </p>
           </div>
+          )}
 
           <div className="ex-card ex-assistant">
             <span className="icon-box blue">
@@ -1413,27 +1760,48 @@ function Results({
   );
 }
 
+type ChatEntry = {
+  role: 'user' | 'assistant';
+  text: string;
+  local?: boolean;  // UI note, not sent to the AI as history
+  generatedBy?: 'gemini' | 'unavailable';
+  tools?: string[];
+  changes?: ItineraryDay[];
+  applied?: boolean;
+  hotelOptions?: Hotel[];
+  suggestedHotelId?: string | null;
+};
+
 function Assistant({
   trip,
   userPlan,
+  onApplyDays,
+  onSelectHotel,
 }: {
   trip: TripPlan | null;
   userPlan: 'free' | 'premium';
+  onApplyDays: (days: ItineraryDay[]) => void;
+  onSelectHotel: (hotel: Hotel) => void;
 }) {
-  const [messages, setMessages] = useState<Array<{ role: 'user' | 'assistant'; text: string }>>([
+  const [messages, setMessages] = useState<ChatEntry[]>([
     {
       role: 'assistant',
+      local: true,
       text: trip
-        ? `I’ve shaped your ${trip.destination} plan around ${trip.purpose.toLowerCase()}, comfortable boutique stays, and real-time weather (${trip.weather.current_condition}, ${trip.weather.current_temp_c}°C). What would you like to fine-tune?`
-        : `Welcome to MYMILE! Tell me where you’d like to go or what adjustments you want to make.`
-    }
+        ? `Ask me to change a day, find a cheaper hotel, or suggest activities for your ${trip.destination} trip.`
+        : `Plan a trip first, then I can adjust its itinerary and hotels. You can still ask general travel questions.`,
+    },
   ]);
   const [text, setText] = useState("");
   const [isThinking, setIsThinking] = useState(false);
+  const [suggestions, setSuggestions] = useState<string[]>(DEFAULT_SUGGESTIONS);
+  const lastAi = [...messages].reverse().find((m) => m.generatedBy);
+  const canSeeBudget = !!trip && canShowBudget(userPlan, trip);
 
   const send = async (value = text) => {
-    if (!value.trim()) return;
+    if (!value.trim() || isThinking) return;
     const userMsg = value.trim();
+    const history = recentHistory(messages);
     setMessages((prev) => [...prev, { role: 'user', text: userMsg }]);
     setText("");
     setIsThinking(true);
@@ -1441,28 +1809,37 @@ function Assistant({
     try {
       const res = await api.chatWithCompanion({
         message: userMsg,
-        current_trip_context: trip ? {
-          destination: trip.destination,
-          dates: `${trip.departure_date} to ${trip.return_date}`,
-          budget: trip.budget_breakdown.total_estimated,
-          weather: trip.weather.current_condition
-        } : undefined,
-        plan: userPlan,
-        budget: trip?.budget_breakdown.total_estimated
+        history,
+        current_trip_context: trip ? buildChatContext(trip, canSeeBudget) : undefined,
       });
-
-      setMessages((prev) => [...prev, { role: 'assistant', text: res.reply }]);
-    } catch {
-      setMessages((prev) => [
-        ...prev,
-        {
-          role: 'assistant',
-          text: `I've noted that! I’ll adjust your daily itinerary pace and coordinate with your verified boutique stay.`
-        }
-      ]);
+      setMessages((prev) => [...prev, {
+        role: 'assistant',
+        text: res.reply,
+        generatedBy: res.generated_by,
+        tools: res.tools_called,
+        changes: res.updated_itinerary_days,
+        hotelOptions: res.hotel_options,
+        suggestedHotelId: res.suggested_hotel_id,
+      }]);
+      if (res.suggestions?.length) setSuggestions(res.suggestions);
+    } catch (err) {
+      // Never pretend something was done: say the request failed.
+      setMessages((prev) => [...prev, {
+        role: 'assistant',
+        local: true,
+        generatedBy: 'unavailable',
+        text: `I couldn't reach the assistant: ${getErrorMessage(err)} Nothing in your plan was changed.`,
+      }]);
     } finally {
       setIsThinking(false);
     }
+  };
+
+  const applyChanges = (index: number) => {
+    const entry = messages[index];
+    if (!entry?.changes?.length || entry.applied) return;
+    onApplyDays(entry.changes);
+    setMessages((prev) => prev.map((m, i) => (i === index ? { ...m, applied: true } : m)));
   };
 
   return (
@@ -1476,28 +1853,63 @@ function Assistant({
             <div>
               <h2>MYMILE Travel Companion</h2>
               <p>
-                <i /> Online · {trip ? trip.destination : "Kyoto trip"} ({userPlan.toUpperCase()})
+                <i /> {trip ? trip.destination : "No trip loaded"} ({userPlan.toUpperCase()})
               </p>
             </div>
           </div>
           <span className="text-xs bg-blue-100 text-blue-800 font-bold px-2.5 py-1 rounded-full">
-            AI Agent Active
+            {lastAi?.generatedBy === 'gemini' ? "Gemini AI" : lastAi ? "AI unavailable" : "AI assistant"}
           </span>
         </div>
 
         <div className="chat-body">
-          {messages.map((m, i) => (
-            <div key={i} className={m.role === 'assistant' ? "ai-message" : "user-message"}>
-              {m.role === 'assistant' && (
-                <span className="icon-box blue">
-                  <Icon name="spark" size={18} />
-                </span>
-              )}
-              <div>
-                <p>{m.text}</p>
+          {messages.map((m, i) => {
+            const suggested = suggestedHotel(m.hotelOptions || [], m.suggestedHotelId);
+            return (
+              <div key={i} className={m.role === 'assistant' ? "ai-message" : "user-message"}>
+                {m.role === 'assistant' && (
+                  <span className="icon-box blue">
+                    <Icon name="spark" size={18} />
+                  </span>
+                )}
+                <div>
+                  <p>{m.text}</p>
+                  {m.generatedBy === 'gemini' && (
+                    <small className="chat-meta">
+                      Gemini{m.tools?.length ? ` · used ${toolList(m.tools)}` : ""}
+                    </small>
+                  )}
+                  {suggested && trip && (
+                    <div className="chat-card">
+                      <b>{suggested.name}</b>
+                      <small>
+                        {suggested.price_per_night != null
+                          ? `${formatMoney(suggested.price_per_night, suggested.currency)} / night`
+                          : "Price not listed"}
+                        {suggested.rating ? ` · ★ ${suggested.rating}` : ""}
+                      </small>
+                      <button className="btn btn-secondary" onClick={() => onSelectHotel(suggested)}>
+                        Use this hotel
+                      </button>
+                    </div>
+                  )}
+                  {m.changes && m.changes.length > 0 && trip && (
+                    <div className="chat-card">
+                      <b>Proposed changes: day {m.changes.map((d) => d.day_number).join(", ")}</b>
+                      {m.changes.map((d) => (
+                        <small key={d.day_number}>
+                          Day {d.day_number} · {d.theme}: {d.activities.map((a) => a.title).join(" → ")}
+                        </small>
+                      ))}
+                      <button className="btn btn-secondary" onClick={() => applyChanges(i)} disabled={m.applied}>
+                        {m.applied ? "Applied to your plan" : "Apply to my plan"}
+                      </button>
+                    </div>
+                  )}
+                </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
 
           {isThinking && (
             <div className="ai-message">
@@ -1508,7 +1920,7 @@ function Assistant({
                 <span className="thinking">
                   <i />
                   <i />
-                  <i /> AI Agent consulting weather, hotels & Channel3 tools...
+                  <i /> Thinking…
                 </span>
               </div>
             </div>
@@ -1516,13 +1928,8 @@ function Assistant({
         </div>
 
         <div className="suggestions">
-          {[
-            "Find a special dinner",
-            "Make day 3 slower",
-            "What should I pack?",
-            "How does budget look?"
-          ].map((x) => (
-            <button onClick={() => send(x)} key={x}>
+          {suggestions.map((x) => (
+            <button onClick={() => send(x)} key={x} disabled={isThinking}>
               {x}
             </button>
           ))}
@@ -1535,7 +1942,7 @@ function Assistant({
             onKeyDown={(e) => e.key === "Enter" && send()}
             placeholder="Ask anything about your itinerary, hotels, or packing..."
           />
-          <button onClick={() => send()} aria-label="Send">
+          <button onClick={() => send()} aria-label="Send" disabled={isThinking}>
             <Icon name="send" />
           </button>
         </div>
@@ -1544,34 +1951,53 @@ function Assistant({
   );
 }
 
+// The product's own image from Channel3, or a neutral placeholder (never a stock photo).
+function ProductImage({ product, className }: { product: Product; className?: string }) {
+  const [failed, setFailed] = useState(false);
+  if (!product.image_url || failed) {
+    return (
+      <div className={`product-img-empty ${className || ""}`} aria-label="No product image">
+        <Icon name="bag" size={22} />
+      </div>
+    );
+  }
+  return <img src={product.image_url} alt={product.name} className={className} onError={() => setFailed(true)} />;
+}
+
 function Shop({
   products,
+  essentials,
+  hasTrip,
   onAddToCart,
   cartCount,
   onOpenCart,
+  onUpgrade,
 }: {
   products: Product[];
+  essentials?: TripPlan["essentials"];
+  hasTrip: boolean;
   onAddToCart: (p: Product) => void;
   cartCount: number;
   onOpenCart: () => void;
+  onUpgrade: () => void;
 }) {
   return (
     <main className="app-bg simple-page wide">
       <div className="page-intro left">
         <div className="flex items-center gap-2 mb-2">
-          <span className="kicker">SPONSOR INTEGRATION · CHANNEL3</span>
-          <span className="bg-yellow-400 text-gray-900 text-[10px] font-extrabold px-2 py-0.5 rounded">
-            AUTHENTIC COMMERCE
-          </span>
+          <span className="kicker">TRAVEL ESSENTIALS · CHANNEL3</span>
         </div>
         <h1>Destination Travel Essentials.</h1>
         <p>
-          Real products, verified prices, and original purchase links powered by Channel3 AI Product Discovery.
+          Real products found by Channel3 for your trip. Prices and availability come from each retailer and may
+          change.
         </p>
       </div>
 
       <div className="shop-toolbar flex items-center justify-between p-4 bg-white rounded-2xl border border-slate-200 mb-6 shadow-sm">
-        <span className="text-xs font-bold text-gray-700">{products.length} essentials picked for your journey</span>
+        <span className="text-xs font-bold text-gray-700">
+          {products.length ? `${products.length} products for your trip` : "No products yet"}
+        </span>
         <button
           onClick={onOpenCart}
           className="btn btn-primary btn-small flex items-center gap-2"
@@ -1580,25 +2006,45 @@ function Shop({
         </button>
       </div>
 
+      {products.length === 0 && (
+        <p className="ex-products-empty">
+          {hasTrip ? essentialsEmptyMessage(essentials) : "Plan a trip to see product suggestions for it."}
+        </p>
+      )}
+
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
         {products.map((prod) => (
           <article className="product-card flex flex-col justify-between h-full bg-white rounded-2xl border border-slate-200 shadow-sm p-4 hover:shadow-md transition-shadow" key={prod.id}>
             <div>
-              <img src={prod.image_url} alt={prod.name} className="w-full h-48 object-cover rounded-xl mb-4" />
+              <ProductImage product={prod} className="w-full h-48 object-cover rounded-xl mb-4" />
               <div className="flex items-center justify-between gap-2 mb-1">
-                <small className="text-[10px] font-bold text-blue-600 uppercase tracking-wider">{prod.category}</small>
-                <span className="text-xs text-yellow-500 font-bold">★ {prod.rating}</span>
+                <small className="text-[10px] font-bold text-blue-600 uppercase tracking-wider">
+                  {prod.category || productSource(prod)}
+                </small>
+                {prod.rating != null && (
+                  <span className="text-xs text-yellow-500 font-bold"
+                        title={prod.rating_count ? `${prod.rating_count.toLocaleString()} ratings` : undefined}>
+                    ★ {prod.rating}
+                  </span>
+                )}
               </div>
               <h3 className="text-base font-bold text-gray-900 leading-snug">{prod.name}</h3>
-              <p className="text-xs text-gray-600 mt-2 leading-relaxed">{prod.description}</p>
-              <div className="p-2.5 bg-slate-50 rounded-lg border border-slate-100 mt-3 text-[11px] text-gray-600 italic">
-                “{prod.reason}”
-              </div>
+              {productSource(prod) && <p className="text-xs text-gray-500 mt-1">{productSource(prod)}</p>}
+              {prod.reason ? (
+                <p className="text-xs text-gray-600 mt-2 leading-relaxed">{prod.reason}</p>
+              ) : prod.description ? (
+                <p className="text-xs text-gray-600 mt-2 leading-relaxed line-clamp-3">{prod.description}</p>
+              ) : null}
             </div>
 
             <div className="pt-4 mt-4 border-t border-slate-100">
               <div className="flex items-center justify-between mb-3">
-                <b className="text-lg font-black text-gray-900">${prod.price.toFixed(2)}</b>
+                <b className="text-lg font-black text-gray-900">
+                  {productPrice(prod)}
+                  {availabilityLabel(prod) && (
+                    <small className="block text-[11px] font-semibold text-gray-500">{availabilityLabel(prod)}</small>
+                  )}
+                </b>
                 <button
                   onClick={() => onAddToCart(prod)}
                   className="btn btn-yellow btn-small"
@@ -1607,15 +2053,26 @@ function Shop({
                 </button>
               </div>
               <div className="flex items-center justify-between text-[11px] text-gray-400">
-                <span>{prod.provider}</span>
-                <a
-                  href={prod.purchase_url}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="text-blue-600 font-semibold hover:underline"
-                >
-                  View on partner site ↗
-                </a>
+                <span>Found by Channel3</span>
+                {/* The backend sends purchase_url only when the account may use it. */}
+                {buyLink(prod) ? (
+                  <a
+                    href={buyLink(prod)!.href}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-blue-600 font-semibold hover:underline"
+                  >
+                    {buyLink(prod)!.label} ↗
+                  </a>
+                ) : (
+                  <button
+                    onClick={onUpgrade}
+                    className="text-blue-600 font-semibold hover:underline"
+                    title="Retailer links are included with Premium"
+                  >
+                    Retailer link with Premium ✦
+                  </button>
+                )}
               </div>
             </div>
           </article>
@@ -1626,14 +2083,23 @@ function Shop({
 }
 
 function Pricing({
-  userPlan,
-  onSelectPlan,
-  go
+  authUser,
+  premiumTerms,
+  plansError,
+  go,
+  refreshUser,
+  onSessionExpired,
 }: {
-  userPlan: 'free' | 'premium';
-  onSelectPlan: (p: 'free' | 'premium') => void;
+  authUser: User | null;              // null = guest (always Free)
+  premiumTerms: PremiumTerms | null;  // from GET /api/subscriptions/plans
+  plansError: boolean;
   go: (v: View) => void;
+  refreshUser: () => Promise<boolean>;
+  onSessionExpired: () => void;
 }) {
+  // Display only: the plan always comes from the backend (/auth/me).
+  const userPlan: 'free' | 'premium' = authUser?.plan === 'premium' ? 'premium' : 'free';
+  const durationDays = premiumTerms?.duration_days;
   return (
     <main className="app-bg simple-page">
       <div className="page-intro">
@@ -1654,14 +2120,8 @@ function Pricing({
             $0 <small>forever</small>
           </h2>
           <p>For curious travelers ready to turn ideas into a clear plan.</p>
-          <button
-            className="btn btn-secondary full-btn"
-            onClick={() => {
-              onSelectPlan('free');
-              alert("Activated Free Plan");
-            }}
-          >
-            {userPlan === 'free' ? 'Current Plan' : 'Switch to Free'}
+          <button className="btn btn-secondary full-btn" disabled>
+            {userPlan === 'free' ? 'Current Plan' : 'Included with Premium'}
           </button>
           {[
             "AI travel planning",
@@ -1695,18 +2155,32 @@ function Pricing({
             )}
           </div>
           <h2>
-            $100<small>/month</small>
+            {formatPremiumPrice(premiumTerms)}
+            <small>{durationDays ? ` for ${durationDays} days` : ""}</small>
           </h2>
-          <p>For travelers who want the best experience balanced within a real budget.</p>
-          <button
-            className="btn btn-yellow full-btn"
-            onClick={() => {
-              onSelectPlan('premium');
-              alert("Premium Plan Activated! AG Grid and Budget Optimization unlocked.");
-            }}
-          >
-            {userPlan === 'premium' ? 'Current Plan' : 'Upgrade to Premium'}
-          </button>
+          <p>
+            {premiumTerms
+              ? `One-time payment of ${formatPremiumPrice(premiumTerms)} (${premiumTerms.currency}) for ${durationDays} days of Premium. No subscription, no automatic renewal.`
+              : plansError
+                ? "Premium pricing is unavailable right now. Please try again later."
+                : "Loading Premium pricing…"}
+          </p>
+          {userPlan === 'premium' ? (
+            <div className="rounded-xl bg-white/90 border border-yellow-300 p-3 text-sm font-semibold text-gray-900">
+              ✓ Premium active
+              {authUser?.premium_until ? ` until ${formatExpiry(authUser.premium_until)}` : ""}
+            </div>
+          ) : !authUser ? (
+            <button className="btn btn-yellow full-btn" onClick={() => go("login")}>
+              Get Premium · {premiumTerms ? formatPremiumPrice(premiumTerms) : "$9"}/month
+            </button>
+          ) : premiumTerms ? (
+            <PremiumCheckout
+              refreshUser={refreshUser}
+              onSessionExpired={onSessionExpired}
+              premiumUntilLabel={formatExpiry}
+            />
+          ) : null}
           {[
             "Everything in Free Plan",
             "Smart budget optimization (e.g. $1,500 budget)",
@@ -1726,36 +2200,69 @@ function Pricing({
   );
 }
 
-function Trips({ go }: { go: (v: View) => void }) {
+function Trips({
+  go,
+  trips,
+  onOpenTrip,
+}: {
+  go: (v: View) => void;
+  trips: StoredTrips;
+  onOpenTrip: (id: string) => void;
+}) {
   return (
     <main className="app-bg simple-page wide">
       <div className="page-intro left">
         <span className="kicker">YOUR JOURNEYS</span>
         <h1>Trips worth looking forward to.</h1>
-        <p>Pick up where you left off or start imagining somewhere new.</p>
+        <p>
+          {trips.trips.length
+            ? "Open a trip to see it in Explore. The active trip is the one Explore shows."
+            : "You haven't planned a trip yet. Start one and it will appear here."}
+        </p>
       </div>
       <div className="trip-list">
-        <article className="saved-trip cursor-pointer" onClick={() => go("results")}>
-          <img src={heroImage} alt="Kyoto" />
-          <div>
-            <span className="status-pill">
-              <i /> UPCOMING · 98% MATCH
-            </span>
-            <h2>Kyoto in bloom</h2>
-            <p>Apr 8–15, 2026 · 2 travelers · Tourism</p>
-            <div className="trip-meta">
-              <span>
-                <Icon name="calendar" size={16} /> 7 days
-              </span>
-              <span>
-                <Icon name="spark" size={16} /> Granbell Hotel
-              </span>
-            </div>
-          </div>
-          <button onClick={() => go("results")}>
-            <Icon name="arrow" />
-          </button>
-        </article>
+        {trips.trips.map((t) => {
+          const active = t.id === trips.activeId;
+          const days = Math.max(
+            1,
+            Math.round((Date.parse(t.return_date) - Date.parse(t.departure_date)) / 86400000) || 1
+          );
+          return (
+            <article
+              key={t.id}
+              className={`saved-trip no-img cursor-pointer${active ? " active" : ""}`}
+              onClick={() => onOpenTrip(t.id)}
+            >
+              <div>
+                <span className="status-pill">
+                  <i /> {active ? "ACTIVE TRIP" : "SAVED TRIP"}
+                </span>
+                <h2>{t.destination_city}, {t.destination_country}</h2>
+                <p>
+                  {formatTripDates(t.departure_date, t.return_date)} · {t.travelers} traveler
+                  {t.travelers > 1 ? "s" : ""} · {t.purpose}
+                </p>
+                <div className="trip-meta">
+                  <span>
+                    <Icon name="calendar" size={16} /> {days} day{days === 1 ? "" : "s"}
+                  </span>
+                  <span>
+                    <Icon name="hotel" size={16} /> {t.stay_preference}
+                  </span>
+                </div>
+              </div>
+              <button
+                aria-label={`Open ${t.destination_city} in Explore`}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onOpenTrip(t.id);
+                }}
+              >
+                <Icon name="arrow" />
+              </button>
+            </article>
+          );
+        })}
 
         <button className="new-trip" onClick={() => go("plan")}>
           <span>+</span>
@@ -1769,11 +2276,9 @@ function Trips({ go }: { go: (v: View) => void }) {
 
 function Profile({
   user,
-  onTogglePlan,
   go
 }: {
   user: User;
-  onTogglePlan: () => void;
   go: (v: View) => void;
 }) {
   return (
@@ -1783,14 +2288,17 @@ function Profile({
           <div className="profile-avatar">{getInitials(user.name)}</div>
           <h2>{user.name}</h2>
           <p>{user.email}</p>
-          <button
-            onClick={onTogglePlan}
-            className={`premium-pill mt-2 font-bold cursor-pointer ${
+          {/* Display only: the plan comes from the backend (/auth/me). */}
+          <span
+            className={`premium-pill mt-2 font-bold ${
               user.plan === 'premium' ? 'bg-yellow-400 text-gray-900' : 'bg-gray-200 text-gray-700'
             }`}
           >
             <Icon name="spark" size={13} /> {user.plan.toUpperCase()}
-          </button>
+          </span>
+          {user.plan === 'premium' && user.premium_until && (
+            <p className="text-xs text-gray-500 mt-1">Premium until {formatExpiry(user.premium_until)}</p>
+          )}
           <nav className="mt-4">
             <button className="active">Personal Profile</button>
             <button onClick={() => go("trips")}>Saved Trips</button>
@@ -2042,7 +2550,7 @@ function Signup({ go, onAuth }: { go: (v: View) => void; onAuth: (u: User) => vo
   );
 }
 
-function Footer({ go, onOpenApimatic }: { go: (v: View) => void; onOpenApimatic: () => void }) {
+function Footer({ go }: { go: (v: View) => void }) {
   return (
     <footer>
       <div className="page-shell footer-grid">
@@ -2050,7 +2558,7 @@ function Footer({ go, onOpenApimatic }: { go: (v: View) => void; onOpenApimatic:
           <img src={logo} alt="MYMILE" className="h-8 w-auto mb-3" />
           <p>Your intelligent travel companion for happier journeys, every mile.</p>
           <div className="mt-3 text-xs text-slate-400">
-            Powered by Channel3 AI Commerce, AG Grid, Open-Meteo & APIMatic
+            Powered by Channel3, AG Grid, Open-Meteo & Google Gemini
           </div>
         </div>
         <div>
@@ -2062,154 +2570,187 @@ function Footer({ go, onOpenApimatic }: { go: (v: View) => void; onOpenApimatic:
         </div>
         <div>
           <b>Developers</b>
-          <button onClick={onOpenApimatic}>APIMatic SDKs</button>
           <a href="/docs" target="_blank" rel="noreferrer" className="block text-slate-400 text-sm hover:text-white py-1">
             FastAPI Docs ↗
           </a>
-          <a href="/api/apimatic/openapi.json" target="_blank" rel="noreferrer" className="block text-slate-400 text-sm hover:text-white py-1">
+          <a href="/openapi.json" target="_blank" rel="noreferrer" className="block text-slate-400 text-sm hover:text-white py-1">
             OpenAPI Spec ↗
           </a>
         </div>
       </div>
       <div className="page-shell copyright">
         <span>© 2026 MYMILE. Your smile, with you every mile.</span>
-        <span>Channel3 · AG Grid · APIMatic · Google Gemini</span>
+        <span>Channel3 · AG Grid · Google Gemini</span>
       </div>
     </footer>
   );
 }
 
-// Guest experience shown when nobody is logged in.
-const DEMO_USER: User = {
-  id: "usr-alex",
-  name: "Alex Morgan",
-  email: "alex@example.com",
-  plan: "premium",
-  created_at: "2026-01-15T10:00:00Z",
-};
+// A cached user (localStorage/sessionStorage) is never trusted for Premium: it
+// is shown as Free until GET /auth/me confirms the real, expiry-aware plan.
+function unverified(u: User | null): User | null {
+  return u ? { ...u, plan: "free", premium_until: null } : null;
+}
 
 export default function App() {
   const [view, setView] = useState<View>("home");
-  const [isLoading, setIsLoading] = useState(false);
-  // The logged-in account (null = guest). Restored from a saved session on load.
-  const [authUser, setAuthUser] = useState<User | null>(() => getStoredUser<User>());
-  const [user, setUser] = useState<User>(() => getStoredUser<User>() ?? DEMO_USER);
+  // The logged-in account (null = guest). Guests are always Free.
+  const [authUser, setAuthUser] = useState<User | null>(() => unverified(getStoredUser<User>()));
+  // Effective plan, as last reported by the backend.
+  const userPlan: "free" | "premium" = authUser?.plan === "premium" ? "premium" : "free";
 
-  // Confirm a saved session is still valid with the server.
-  useEffect(() => {
-    if (!getStoredToken()) return;
-    api
-      .getMe()
-      .then((me: User) => {
-        setAuthUser(me);
-        setUser(me);
-      })
-      .catch((err) => {
-        // Only drop the session if the server rejected it, not if it's just unreachable.
-        if (err?.response?.status === 401) {
-          api.logout();
-          setAuthUser(null);
-          setUser(DEMO_USER);
-        }
-      });
+  // True once the saved session (if any) has been confirmed or rejected by /auth/me.
+  const [authChecked, setAuthChecked] = useState(() => !getStoredToken());
+  const [premiumTerms, setPremiumTerms] = useState<PremiumTerms | null>(null);
+  const [plansError, setPlansError] = useState(false);
+
+  const handleSessionExpired = useCallback(() => {
+    api.logout();
+    setAuthUser(null);
+    setView("login");
   }, []);
+
+  // GET /auth/me is the source of truth for the plan. Resolves true if Premium.
+  const refreshUser = useCallback(async (): Promise<boolean> => {
+    try {
+      const me: User = await api.getMe();
+      setAuthUser(me);
+      updateStoredUser(me);
+      return me.plan === "premium";
+    } catch (err: any) {
+      if (err?.response?.status === 401) {
+        handleSessionExpired();
+        throw new SessionExpiredError();
+      }
+      throw err;
+    }
+  }, [handleSessionExpired]);
+
+  // On load: confirm a saved session with the server, and fetch public plan terms.
+  useEffect(() => {
+    if (getStoredToken()) {
+      // Network failures keep the (unverified, Free) session; 401 logs out.
+      refreshUser().catch(() => undefined).finally(() => setAuthChecked(true));
+    }
+    api
+      .getPlans()
+      .then((plans) => {
+        const p = plans?.premium;
+        if (p && p.price != null && p.currency && p.duration_days) {
+          setPremiumTerms({
+            price: String(p.price),
+            currency: p.currency,
+            duration_days: p.duration_days,
+            one_time: p.one_time !== false,
+            auto_renew: p.auto_renew === true,
+          });
+        } else {
+          setPlansError(true);
+        }
+      })
+      .catch(() => setPlansError(true));
+  }, [refreshUser]);
 
   const [currentTrip, setCurrentTrip] = useState<TripPlan | null>(null);
   const [selectedHotel, setSelectedHotel] = useState<Hotel | null>(null);
+  // Effect of the latest hotel switch on the Premium budget (shown under the comparison grid).
+  const [budgetImpact, setBudgetImpact] = useState<BudgetImpact | null>(null);
   const [cart, setCart] = useState<CartItem[]>([]);
   const [isCartOpen, setIsCartOpen] = useState(false);
-  const [isApimaticOpen, setIsApimaticOpen] = useState(false);
 
-  // Initialize with a default rich plan on first load
-  useEffect(() => {
-    async function loadInitialPlan() {
-      try {
-        const plan = await api.planTrip({
-          destination: "Kyoto, Japan",
-          departure_date: "2026-04-08",
-          return_date: "2026-04-15",
-          travelers: 2,
-          purpose: "Tourism",
-          stay_preference: "Boutique hotel",
-          priorities: ["Local culture", "Great food", "Slow pace"],
-          plan: user.plan,
-          total_budget: user.plan === "premium" ? 4500 : undefined,
-        });
-        setCurrentTrip(plan);
-        setSelectedHotel(plan.recommended_hotel);
-      } catch (err) {
-        console.error("Initial load failed, will generate on demand:", err);
-      }
+  // ---- Planned trips: the source of truth for Explore ----
+  // Stored per account as the Plan a Trip REQUEST (see services/tripStore.ts). The
+  // plan itself always comes from the server, which re-decides Premium content.
+  // There is no default/demo trip: Explore stays empty until the user plans one.
+  const account = accountKey(authUser?.id);
+  const [trips, setTrips] = useState<StoredTrips>(() => loadTrips(browserStore(), account));
+  const [tripStatus, setTripStatus] = useState<"idle" | "loading" | "ready" | "error">(() =>
+    getActiveTrip(loadTrips(browserStore(), account)) ? "loading" : "idle"
+  );
+  const [tripError, setTripError] = useState("");
+  const isLoading = tripStatus === "loading";
+  const planSeq = useRef(0);
+  const lastRequest = useRef<TripRequest | null>(null);
+  const userPlanRef = useRef(userPlan);
+  userPlanRef.current = userPlan;
+
+  // Plan (or re-plan) a trip with ALL of its fields. Only the latest request may
+  // update Explore, so a slower, older response can never replace a newer trip.
+  const runPlan = useCallback(async (trip: TripRequest): Promise<boolean> => {
+    const seq = ++planSeq.current;
+    lastRequest.current = trip;
+    setTripStatus("loading");
+    setTripError("");
+    try {
+      const plan = await api.planTrip(toPlanPayload(trip, userPlanRef.current));
+      if (seq !== planSeq.current) return false;
+      setCurrentTrip(plan);
+      setSelectedHotel(plan.recommended_hotel);
+      setBudgetImpact(null);
+      setTripStatus("ready");
+      return true;
+    } catch (err) {
+      if (seq !== planSeq.current) return false;
+      setTripStatus("error");
+      setTripError(getErrorMessage(err, "Your trip could not be planned. Please try again."));
+      return false;
     }
-    loadInitialPlan();
   }, []);
 
-  const handleTogglePlan = async () => {
-    const nextPlan = user.plan === "premium" ? "free" : "premium";
-    setUser((prev) => ({ ...prev, plan: nextPlan }));
-    if (currentTrip) {
-      // Re-run planning with the new plan tier
-      setIsLoading(true);
-      try {
-        const updated = await api.planTrip({
-          destination: currentTrip.destination,
-          departure_date: currentTrip.departure_date,
-          return_date: currentTrip.return_date,
-          travelers: currentTrip.travelers,
-          purpose: currentTrip.purpose,
-          stay_preference: currentTrip.stay_preference,
-          plan: nextPlan,
-          total_budget: nextPlan === "premium" ? 4500 : undefined,
-        });
-        setCurrentTrip(updated);
-        setSelectedHotel(updated.recommended_hotel);
-      } catch (err) {
-        console.error("Error refreshing plan:", err);
-      } finally {
-        setIsLoading(false);
-      }
+  // On load, and whenever the account or its server-verified plan changes
+  // (login, logout, upgrade, expiry): show THIS account's active trip, re-planned
+  // so Premium content matches the current entitlement. Waits for /auth/me.
+  const tripKey = `${authChecked}:${account}:${userPlan}`;
+  useEffect(() => {
+    if (!authChecked) return;
+    const stored = loadTrips(browserStore(), account);
+    setTrips(stored);
+    const active = getActiveTrip(stored);
+    if (active) {
+      void runPlan(active);
+    } else {
+      planSeq.current += 1; // ignore anything still in flight for the previous account
+      setCurrentTrip(null);
+      setSelectedHotel(null);
+      setBudgetImpact(null);
+      setTripStatus("idle");
+    }
+  }, [tripKey]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const handleGeneratePlan = async (input: TripInput): Promise<boolean> => {
+    const trip: TripRequest = { ...input, id: newTripId(), created_at: new Date().toISOString() };
+    const ok = await runPlan(trip);
+    if (ok) setTrips(saveTrip(browserStore(), account, trip)); // only successful trips are saved
+    return ok;
+  };
+
+  const handleOpenTrip = (id: string) => {
+    const stored = setActiveTrip(browserStore(), account, id);
+    setTrips(stored);
+    const active = getActiveTrip(stored);
+    if (active) {
+      void runPlan(active);
+      go("results");
     }
   };
 
-  const handleGeneratePlan = async (data: any) => {
-    setIsLoading(true);
-    try {
-      const plan = await api.planTrip(data);
-      setCurrentTrip(plan);
-      setSelectedHotel(plan.recommended_hotel);
-    } catch (err) {
-      alert("Failed to generate plan. Please verify backend is running on http://127.0.0.1:8000.");
-    } finally {
-      setIsLoading(false);
+  const retryTrip = async () => {
+    const trip = lastRequest.current;
+    if (!trip) return;
+    const ok = await runPlan(trip);
+    if (ok && !loadTrips(browserStore(), account).trips.some((t) => t.id === trip.id)) {
+      setTrips(saveTrip(browserStore(), account, trip));
     }
   };
 
   const handleSelectHotel = (hotel: Hotel) => {
-    setSelectedHotel(hotel);
-    if (currentTrip && user.plan === "premium") {
-      // Recalculate remaining budget with newly selected hotel
-      const userBudget = currentTrip.budget_breakdown.user_budget || 4500;
-      const hotelCost = hotel.total_price;
-      const otherCosts = currentTrip.budget_breakdown.food +
-        currentTrip.budget_breakdown.transportation +
-        currentTrip.budget_breakdown.activities +
-        currentTrip.budget_breakdown.travel_essentials +
-        currentTrip.budget_breakdown.contingency_and_other;
-      const newTotal = hotelCost + otherCosts;
-      const newRemaining = userBudget - newTotal;
-
-      setCurrentTrip({
-        ...currentTrip,
-        recommended_hotel: hotel,
-        budget_breakdown: {
-          ...currentTrip.budget_breakdown,
-          accommodation: hotelCost,
-          total_estimated: newTotal,
-          remaining_balance: newRemaining,
-          status: newRemaining >= 0 ? "balanced" : "over_budget",
-        }
-      });
-    }
+    // Same budget recalculation as before (see services/hotelComparison.ts); selecting
+    // the hotel that is already selected changes nothing and recalculates nothing.
+    const result = applyHotelSelection(currentTrip, selectedHotel, hotel, userPlan);
+    if (!result) return;
+    setSelectedHotel(result.selectedHotel);
+    if (result.trip && result.trip !== currentTrip) setCurrentTrip(result.trip);
+    setBudgetImpact(result.impact);
   };
 
   const handleAddToCart = (product: Product) => {
@@ -2251,76 +2792,97 @@ export default function App() {
   };
 
   const handleAuth = (u: User) => {
+    // Login/register responses carry the backend's effective plan.
     setAuthUser(u);
-    setUser(u);
     go("home");
   };
 
   const handleLogout = () => {
     api.logout();
-    setAuthUser(null);
-    setUser(DEMO_USER);
+    setAuthUser(null); // guest = Free
     go("home");
   };
 
   const totalCartCount = cart.reduce((acc, i) => acc + i.quantity, 0);
 
+  // Cart items keep the product object from when they were added. Show the
+  // purchase link from the LATEST server response for this account instead, so
+  // links appear after an upgrade and disappear after logout.
+  const cartView: CartItem[] = cart.map((item) => {
+    const latest = currentTrip?.travel_essentials.find((p) => p.id === item.product.id);
+    return { ...item, product: latest ?? { ...item.product, purchase_url: null } };
+  });
+
   const content = useMemo(() => {
-    if (view === "home") return <Home go={go} onOpenApimatic={() => setIsApimaticOpen(true)} />;
+    if (view === "home") return (
+      <Home go={go} premiumTerms={premiumTerms} />
+    );
     if (view === "plan") return (
       <Planner
         go={go}
         onGeneratePlan={handleGeneratePlan}
         isLoading={isLoading}
-        userPlan={user.plan}
+        userPlan={userPlan}
       />
     );
     if (view === "results") {
-      if (!currentTrip) {
-        return (
-          <div className="min-h-[500px] flex items-center justify-center text-center p-8">
-            <div>
-              <h2 className="text-xl font-bold">No active travel plan yet</h2>
-              <p className="text-gray-500 mt-2">Let our AI agent build your dream journey.</p>
-              <button className="btn btn-primary mt-4" onClick={() => go("plan")}>
-                Start Planning
-              </button>
-            </div>
-          </div>
-        );
+      if (tripStatus === "loading") return <ExploreStatus status="loading" go={go} />;
+      if (tripStatus === "error") {
+        return <ExploreStatus status="error" message={tripError} onRetry={retryTrip} go={go} />;
       }
+      if (!currentTrip) return <ExploreEmpty go={go} />;
       return (
         <Results
           plan={currentTrip}
           go={go}
           onAddToCart={handleAddToCart}
-          userPlan={user.plan}
+          userPlan={userPlan}
           onSelectHotel={handleSelectHotel}
           selectedHotel={selectedHotel}
+          budgetImpact={budgetImpact}
         />
       );
     }
     if (view === "pricing") return (
       <Pricing
-        userPlan={user.plan}
-        onSelectPlan={(p) => setUser((u) => ({ ...u, plan: p }))}
+        authUser={authUser}
+        premiumTerms={premiumTerms}
+        plansError={plansError}
         go={go}
+        refreshUser={refreshUser}
+        onSessionExpired={handleSessionExpired}
       />
     );
-    if (view === "assistant") return <Assistant trip={currentTrip} userPlan={user.plan} />;
-    if (view === "trips") return <Trips go={go} />;
+    if (view === "assistant")
+      return (
+        <Assistant
+          trip={currentTrip}
+          userPlan={userPlan}
+          onApplyDays={(days) => setCurrentTrip((t) => (t ? applyItineraryChanges(t, days) : t))}
+          onSelectHotel={handleSelectHotel}
+        />
+      );
+    if (view === "trips") return <Trips go={go} trips={trips} onOpenTrip={handleOpenTrip} />;
     if (view === "shop") return (
       <Shop
         products={currentTrip ? currentTrip.travel_essentials : []}
+        essentials={currentTrip?.essentials}
+        hasTrip={!!currentTrip}
         onAddToCart={handleAddToCart}
         cartCount={totalCartCount}
         onOpenCart={() => setIsCartOpen(true)}
+        onUpgrade={() => go("pricing")}
       />
     );
-    if (view === "profile") return <Profile user={user} onTogglePlan={handleTogglePlan} go={go} />;
+    if (view === "profile") {
+      // Guests have no profile: ask them to log in.
+      return authUser ? <Profile user={authUser} go={go} /> : <Login go={go} onAuth={handleAuth} />;
+    }
     if (view === "signup") return <Signup go={go} onAuth={handleAuth} />;
     return <Login go={go} onAuth={handleAuth} />;
-  }, [view, currentTrip, selectedHotel, user, isLoading, cart]);
+  }, [view, currentTrip, selectedHotel, authUser, userPlan, isLoading, tripStatus, tripError, trips,
+      cart, premiumTerms, plansError,
+      refreshUser, handleSessionExpired]);
 
   return (
     <>
@@ -2332,22 +2894,20 @@ export default function App() {
       />
       {content}
       {!["plan", "assistant", "login", "signup"].includes(view) && (
-        <Footer go={go} onOpenApimatic={() => setIsApimaticOpen(true)} />
+        <Footer go={go} />
       )}
 
       {/* Slide-over Shopping Cart */}
       <ShoppingCartDrawer
         isOpen={isCartOpen}
         onClose={() => setIsCartOpen(false)}
-        items={cart}
+        items={cartView}
         onUpdateQuantity={handleUpdateCartQuantity}
         onRemoveItem={handleRemoveCartItem}
-      />
-
-      {/* APIMatic SDK & OpenAPI Modal */}
-      <ApimaticModal
-        isOpen={isApimaticOpen}
-        onClose={() => setIsApimaticOpen(false)}
+        onUpgrade={() => {
+          setIsCartOpen(false);
+          go("pricing");
+        }}
       />
     </>
   );

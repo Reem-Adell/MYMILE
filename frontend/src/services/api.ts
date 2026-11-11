@@ -1,5 +1,5 @@
 import axios from 'axios';
-import { TripPlan, Product, Hotel, WeatherData } from '../types';
+import { TripPlan, Product, Hotel, WeatherData, DestinationImage, HotelOffers, ChatTurn, TripChatResult } from '../types';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '/api';
 
@@ -27,6 +27,13 @@ function clearSession() {
   for (const store of [localStorage, sessionStorage]) {
     store.removeItem(TOKEN_KEY);
     store.removeItem(USER_KEY);
+  }
+}
+
+// Replace the cached user (e.g. after GET /auth/me) without touching the token.
+export function updateStoredUser(user: unknown) {
+  for (const store of [localStorage, sessionStorage]) {
+    if (store.getItem(TOKEN_KEY)) store.setItem(USER_KEY, JSON.stringify(user));
   }
 }
 
@@ -99,6 +106,8 @@ export const api = {
   // Trips & AI Agent
   planTrip: async (payload: {
     destination: string;
+    destination_city?: string;
+    destination_country?: string;
     departure_date: string;
     return_date: string;
     travelers: number;
@@ -107,21 +116,20 @@ export const api = {
     priorities?: string[];
     notes?: string;
     plan: 'free' | 'premium';
-    total_budget?: number;
-    currency?: string;
+    total_budget?: number; // always US dollars
   }): Promise<TripPlan> => {
-    const res = await apiClient.post<TripPlan>('/trips/plan', payload);
+    // The Gemini agent may take up to AI_AGENT_DEADLINE_SECONDS (180 s) plus tool time.
+    const res = await apiClient.post<TripPlan>('/trips/plan', payload, { timeout: 210000 });
     return res.data;
   },
 
   chatWithCompanion: async (payload: {
     message: string;
-    history?: { role: string; content: string }[];
-    current_trip_context?: any;
-    plan?: string;
+    history?: ChatTurn[];
+    current_trip_context?: Record<string, unknown>;
     budget?: number;
-  }) => {
-    const res = await apiClient.post('/trips/chat', payload);
+  }): Promise<TripChatResult> => {
+    const res = await apiClient.post<TripChatResult>('/trips/chat', payload, { timeout: 210000 });
     return res.data;
   },
 
@@ -144,24 +152,12 @@ export const api = {
     return res.data;
   },
 
-  // Products (Channel3)
-  searchProducts: async (params: {
-    destination?: string;
-    trip_type?: string;
-    season?: string;
-    limit?: number;
-  }): Promise<{ query_context: string; products: Product[]; source: string }> => {
-    const res = await apiClient.get('/products/search', { params });
-    return res.data;
-  },
-
   // Budget Optimization
   optimizeBudget: async (payload: {
     destination: string;
     duration_days: number;
     travelers: number;
-    total_budget: number;
-    currency?: string;
+    total_budget: number; // always US dollars
     selected_hotel_price_total?: number;
     stay_preference?: string;
   }) => {
@@ -169,25 +165,42 @@ export const api = {
     return res.data;
   },
 
-  // Subscriptions
+  // Subscriptions (public). The Premium entry carries price/currency/duration
+  // from backend settings. There is no upgrade call: Premium is only granted by
+  // the backend after a verified PayPal capture (see services/payments.ts).
+  // Real photo of the destination (Wikipedia/Wikimedia Commons, verified and
+  // cached by the backend). Resolves null when no verified photo exists.
+  getDestinationImage: async (city: string, country: string): Promise<DestinationImage | null> => {
+    const res = await apiClient.get<{ image: DestinationImage | null }>('/places/destination-image', {
+      params: { city, country },
+      timeout: 10000,
+    });
+    return res.data?.image ?? null;
+  },
+
+  // Premium: provider booking links for one hotel from the trip's live search.
+  getHotelOffers: async (params: {
+    property_token: string;
+    destination: string;
+    city?: string | null;
+    country?: string | null;
+    check_in: string;
+    check_out: string;
+    adults: number;
+  }): Promise<HotelOffers> => {
+    const res = await apiClient.get<HotelOffers>('/hotels/offers', {
+      params: {
+        ...params,
+        city: params.city || undefined,
+        country: params.country || undefined,
+      },
+      timeout: 25000,
+    });
+    return res.data;
+  },
+
   getPlans: async () => {
     const res = await apiClient.get('/subscriptions/plans');
-    return res.data;
-  },
-
-  upgradePlan: async (plan: 'free' | 'premium') => {
-    const res = await apiClient.post('/subscriptions/upgrade', { plan });
-    return res.data;
-  },
-
-  // APIMatic
-  getApimaticPortalInfo: async () => {
-    const res = await apiClient.get('/apimatic/portal-info');
-    return res.data;
-  },
-
-  getApimaticSdkSnippet: async (language: 'typescript' | 'python') => {
-    const res = await apiClient.get(`/apimatic/sdk/${language}`);
     return res.data;
   },
 };

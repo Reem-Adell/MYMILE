@@ -18,8 +18,14 @@ AREA_KEYWORDS: Dict[str, List[str]] = {
         "downtown", "down town", "city center", "city centre", "tahrir", "garden city",
         "talaat harb", "abdeen", "abdin", "wust el balad", "wust al balad", "west el balad",
         "وسط البلد", "التحرير", "جاردن سيتي", "قصر النيل",
+        # Alexandria downtown
+        "raml station", "raml", "saad zaghloul", "manshia", "mansheya", "bibliotheca",
+        "library of alexandria", "محطة الرمل", "سعد زغلول", "المنشية", "مكتبة الإسكندرية",
     ],
     "zamalek": ["zamalek", "gezira", "gezirah", "الزمالك", "الجزيرة"],
+    "montaza": ["montaza", "montazah", "maamoura", "المنتزه", "المعمورة"],
+    "san-stefano": ["san stefano", "سان ستيفانو"],
+    "sidi-bishr": ["sidi bishr", "سيدي بشر"],
     "giza": [
         "giza", "pyramid", "pyramids", "grand egyptian museum", "gem ", "sphinx",
         "الجيزة", "الهرم", "الأهرام", "الاهرامات", "المتحف المصري الكبير",
@@ -32,11 +38,16 @@ AREA_KEYWORDS: Dict[str, List[str]] = {
 
 # Human-friendly names used in the explanation shown to the traveler.
 AREA_LABELS = {
-    "downtown": "in Downtown Cairo",
+    "downtown": "in downtown {city}",
     "zamalek": "in Zamalek",
     "giza": "by the Pyramids in Giza",
-    "airport": "right at Cairo Airport",
+    "airport": "right at {city} Airport",
+    "montaza": "by the Montaza gardens",
+    "san-stefano": "in San Stefano on the Corniche",
+    "sidi-bishr": "in Sidi Bishr on the Corniche",
 }
+
+CITY_LABELS = {"cairo": "Cairo", "alexandria": "Alexandria"}
 
 WORK_WORDS = [
     "interview", "meeting", "work", "business", "conference", "office", "job", "client",
@@ -54,6 +65,7 @@ FAMILY_WORDS = ["family", "kids", "children", "child", "baby", "أطفال", "ا
 NIGHTLIFE_WORDS = ["nightlife", " bars", "party", "night out", "سهر"]
 NILE_WORDS = ["nile", "النيل", "river view"]
 POOL_WORDS = ["pool", "swim", "حمام سباحة", "مسبح"]
+BEACH_WORDS = ["beach", "seaside", "sea view", "by the sea", "mediterranean", "شاطئ", "بحر", "البحر"]
 CHEAP_WORDS = ["cheap", "budget", "affordable", "low cost", "رخيص", "اقتصادي"]
 
 
@@ -65,6 +77,9 @@ def _has_any(text: str, words: List[str]) -> bool:
 class StayIntent:
     area: Optional[str] = None
     wants: Set[str] = field(default_factory=set)  # hotel tags we're looking for
+    # Tags the traveler asked for themselves (note / priorities). These outweigh the
+    # general defaults that come from the trip purpose alone.
+    explicit: Set[str] = field(default_factory=set)
     reason: str = "trip"  # "work", "tourism", "umrah", "family", "trip"
     cheap: bool = False
 
@@ -96,28 +111,36 @@ def detect_intent(purpose: str, priorities: List[str], notes: Optional[str]) -> 
     elif is_work:
         intent.reason = "work"
         intent.wants |= {"business", "wifi", "quiet", "central"}
+        if _has_any(note, WORK_WORDS) or any("work" in p.lower() for p in priorities or []):
+            intent.explicit |= {"business", "wifi", "quiet"}
     elif is_tourism:
         intent.reason = "tourism"
         intent.wants |= {"museums", "landmarks", "famous", "central"}
 
+    def want(tag: str) -> None:
+        intent.wants.add(tag)
+        intent.explicit.add(tag)
+
     if _has_any(text, QUIET_WORDS) or any("slow pace" in p.lower() for p in priorities or []):
-        intent.wants.add("quiet")
+        want("quiet")
     if _has_any(text, WIFI_WORDS):
-        intent.wants.add("wifi")
+        want("wifi")
     if _has_any(text, MUSEUM_WORDS) or any("local culture" in p.lower() for p in priorities or []):
-        intent.wants.add("museums")
+        want("museums")
     if _has_any(text, FAMOUS_WORDS):
-        intent.wants.add("famous")
+        want("famous")
     if _has_any(text, FAMILY_WORDS):
-        intent.wants |= {"family", "pool"}
+        want("family"); want("pool")
         if intent.reason == "trip":
             intent.reason = "family"
     if _has_any(text, NIGHTLIFE_WORDS):
-        intent.wants.add("nightlife")
+        want("nightlife")
     if _has_any(text, NILE_WORDS):
-        intent.wants.add("nile")
+        want("nile")
     if _has_any(text, POOL_WORDS):
-        intent.wants.add("pool")
+        want("pool")
+    if _has_any(text, BEACH_WORDS) or any("beach" in p.lower() for p in priorities or []):
+        want("beach")
     if _has_any(text, CHEAP_WORDS):
         intent.cheap = True
 
@@ -138,6 +161,7 @@ TAG_PHRASES = {
     "nightlife": "restaurants and nightlife nearby",
     "nile": "Nile views",
     "haram": "steps from the Haram",
+    "beach": "beach access",
 }
 
 
@@ -146,7 +170,8 @@ def score_hotel(hotel: dict, intent: StayIntent, preference_key: str, nightly_ca
     score = 0.0
     if intent.area:
         score += 60 if hotel.get("area") == intent.area else -25
-    score += 10 * len(tags & intent.wants)
+    score += 8 * len(tags & intent.wants)
+    score += 16 * len(tags & intent.explicit)
     if preference_key and preference_key in hotel.get("category", "").lower():
         # A budget traveler really means it; for other styles it's a softer preference.
         score += 45 if preference_key == "budget" else 18
@@ -160,10 +185,14 @@ def score_hotel(hotel: dict, intent: StayIntent, preference_key: str, nightly_ca
 
 def explain_match(hotel: dict, intent: StayIntent) -> str:
     tags = set(hotel.get("tags", []))
-    matched = [TAG_PHRASES[t] for t in TAG_PHRASES if t in tags and t in intent.wants]
+    # What they asked for themselves comes first in the explanation.
+    order = sorted(TAG_PHRASES, key=lambda t: t not in intent.explicit)
+    matched = [TAG_PHRASES[t] for t in order if t in tags and t in intent.wants]
     parts: List[str] = []
     if intent.area and hotel.get("area") == intent.area:
-        parts.append(f"{AREA_LABELS.get(intent.area, 'in ' + intent.area)}, where you need to be")
+        city = CITY_LABELS.get(hotel.get("destination", ""), "the city")
+        label = AREA_LABELS.get(intent.area, "in " + intent.area).format(city=city)
+        parts.append(f"{label}, where you need to be")
     parts.extend(matched[:3])
 
     if not parts:

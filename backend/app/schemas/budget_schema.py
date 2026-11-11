@@ -25,8 +25,7 @@ class BudgetOptimizationRequest(BaseModel):
     destination: str
     duration_days: int
     travelers: int = 1
-    total_budget: float
-    currency: str = "USD"
+    total_budget: float  # always USD
     stay_preference: str = "Boutique hotel"
     trip_purpose: str = "Tourism"
     selected_hotel_price_total: Optional[float] = None

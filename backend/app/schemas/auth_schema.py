@@ -14,8 +14,9 @@ class UserOut(BaseModel):
     id: str
     name: str
     email: str
-    plan: str = "free"  # "free" or "premium"
+    plan: str = "free"  # EFFECTIVE plan ("free" or "premium"), see app/core/premium.py
     created_at: str
+    premium_until: Optional[str] = None  # stored Premium expiry (ISO-8601 UTC) or null
 
 class Token(BaseModel):
     access_token: str
