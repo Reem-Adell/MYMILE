@@ -200,26 +200,26 @@ class GeminiClientTest(unittest.TestCase):
 class AiTripPlanningTest(_AgentApi):
 
     def test_gemini_calls_real_tools_and_its_plan_is_used(self):
-        fake = FakeGemini([calls(("get_weather_forecast", {}), ("search_hotels", {}), ("find_activities", {})),
+        fake = FakeGemini([calls(("get_weather_forecast", {}), ("search_hotels", {})),
                            text(plan_json("cai-03"))])
         with fake.patch():
             trip = self.cairo()
         self.assertEqual(trip["ai"]["generated_by"], "gemini")
-        self.assertEqual(trip["ai"]["tools_used"], ["get_weather_forecast", "search_hotels", "find_activities"])
+        self.assertEqual(trip["ai"]["tools_used"], ["get_weather_forecast", "search_hotels"])
         self.assertIsNone(trip["match_score"], "no fabricated score")
         self.assertEqual(trip["destination_summary"], "Three relaxed museum days in Cairo.")
         self.assertEqual(trip["recommended_hotel"]["id"], "cai-03")
         self.assertTrue(trip["recommended_hotel"]["is_best_match"])
         self.assertEqual(sum(h["is_best_match"] for h in trip["all_hotels"]), 1)
-        self.assertEqual([d["theme"] for d in trip["itinerary"]], ["AI day 1", "AI day 2", "AI day 3"])
-        self.assertEqual(trip["itinerary"][0]["date_str"], "Tuesday, Dec 01")
+        self.assertNotIn("itinerary", trip)
+        names = [d.name for d in fake.requests[0]["tools"][0].function_declarations]
+        self.assertNotIn("find_activities", names)
         self.assertEqual(trip["weather"]["current_condition"], "Clear sky")
 
         results = dict(fake.tool_results(1))
         self.assertTrue(results["get_weather_forecast"]["available"])
         hotel_ids = [h["id"] for h in results["search_hotels"]["hotels"]]
         self.assertIn("cai-03", hotel_ids)
-        self.assertTrue(results["find_activities"]["activities"])
         sent = json.dumps(results)
         for private in ("booking_link", "image_url", "http"):
             self.assertNotIn(private, sent, "only needed data goes to the model")
@@ -371,13 +371,13 @@ class AiTripPlanningTest(_AgentApi):
         self.assertTrue(fake.requests[1]["json_output"])
         self.assertIsNone(fake.requests[1]["tools"])
 
-    def test_incomplete_itinerary_is_rejected_and_labelled_as_template(self):
-        with FakeGemini([text(plan_json(days=2))]).patch():
+    def test_incomplete_answer_is_rejected_and_labelled_as_template(self):
+        with FakeGemini([text({"summary": "Only a summary."})]).patch():
             trip = self.cairo()
         self.assertEqual(trip["ai"]["generated_by"], "rules")
         self.assertIn("couldn't use", trip["ai"]["notice"])
         self.assertIn("Template plan (not AI-personalized)", trip["why_recommended"])
-        self.assertEqual(len(trip["itinerary"]), 3)
+        self.assertNotIn("itinerary", trip, "the template has no itinerary either")
 
     def test_no_key_means_labelled_template_and_no_gemini_request(self):
         fake = FakeGemini([])
@@ -404,7 +404,7 @@ class AiTripPlanningTest(_AgentApi):
             second = self.cairo()
             self.assertEqual(len(fake.requests), 2, "page refresh: no new Gemini request")
             self.assertTrue(second["ai"]["cached"])
-            self.assertEqual(second["itinerary"], first["itinerary"])
+            self.assertEqual(second["destination_summary"], first["destination_summary"])
             self.assertEqual(second["recommended_hotel"]["id"], "cai-03")
             other = self.cairo(travelers=3)
         self.assertEqual(len(fake.requests), 3)
@@ -423,10 +423,13 @@ class AiTripPlanningTest(_AgentApi):
                            text(plan_json("cai-03"))])
         with fake.patch():
             prem = self.cairo(headers=self._premium(), total_budget=2000)
-        self.assertIn("estimate_budget", prem["ai"]["tools_used"])
-        budget_result = dict(fake.tool_results(2))["estimate_budget"]
-        self.assertEqual(budget_result["hotel_used"], "The Nile Ritz-Carlton, Cairo")
+        names = [d.name for d in fake.requests[0]["tools"][0].function_declarations]
+        self.assertNotIn("estimate_budget", names, "planning has no budget tool: the server adds the breakdown")
+        self.assertNotIn("estimate_budget", prem["ai"]["tools_used"])
+        refused = dict(fake.tool_results(2))["estimate_budget"]
+        self.assertIn("server adds the budget", refused["error"])
         self.assertIsNotNone(prem["budget_breakdown"])
+        self.assertEqual(prem["budget_breakdown"]["user_budget"], 2000)
         self.assertTrue(all(h["booking_link"] for h in prem["all_hotels"]))
 
     def test_model_cannot_change_destination_or_dates_of_tools(self):
@@ -529,7 +532,7 @@ class AiChatTest(_AgentApi):
         self.assertEqual(r.status_code, 200, r.text)
         return r.json()
 
-    def test_find_a_cheaper_hotel_and_change_a_day(self):
+    def test_find_a_cheaper_hotel(self):
         box = AgentToolbox(TripContext(destination="Cairo, Egypt", city="Cairo", country="Egypt",
                                        check_in="2026-12-01", check_out="2026-12-04", nights=3, travelers=2,
                                        purpose="Tourism", stay_preference="Boutique hotel"), "free")
@@ -539,10 +542,7 @@ class AiChatTest(_AgentApi):
             calls(("search_hotels", {"sort_by": "price_low_to_high", "max_price_per_night": 100})),
             text({"reply": f"{cheap[0].name} is cheaper.", "suggestions": ["Use it", "Show more", "x", "y"],
                   "suggested_hotel_id": cheap[0].id,
-                  "itinerary_changes": [{"day_number": 2, "theme": "Slow museum day", "activities": [
-                      {"time": "10:00 AM", "title": "Egyptian Museum", "description": "Unhurried visit",
-                       "location": "Tahrir", "icon": "pin", "cost_estimate": 12}]},
-                      {"day_number": 9, "theme": "Not in trip", "activities": [{"title": "x"}]}]}),
+                  "itinerary_changes": [{"day_number": 2, "theme": "ignored now"}]}),
         ])
         history = [{"role": "user", "content": "I like quiet places"}, {"role": "assistant", "content": "Noted."}]
         with fake.patch():
@@ -552,14 +552,14 @@ class AiChatTest(_AgentApi):
         self.assertTrue(all(h["price_per_night"] <= 100 for h in res["hotel_options"]))
         self.assertEqual(res["suggested_hotel_id"], cheap[0].id)
         self.assertEqual(len(res["suggestions"]), 3)
-        self.assertEqual([d["day_number"] for d in res["updated_itinerary_days"]], [2], "day 9 doesn't exist")
-        self.assertEqual(res["updated_itinerary_days"][0]["date_str"], "Wednesday, Dec 02")
+        self.assertNotIn("updated_itinerary_days", res, "itinerary edits from the model are ignored")
 
         sent = fake.requests[0]["contents"]
         self.assertEqual([c.role for c in sent[:2]], ["user", "model"], "conversation history is sent")
         prompt = sent[-1].parts[0].text
         self.assertIn('"current_hotel"', prompt)
-        self.assertIn("Visit 2", prompt, "itinerary is part of the context")
+        self.assertNotIn("Visit 2", prompt, "an old client's itinerary is not sent to the model")
+        self.assertNotIn("itinerary", fake.requests[0]["system"])
 
     def test_suggested_hotel_must_come_from_this_turns_search(self):
         with FakeGemini([text({"reply": "Try Hotel X", "suggested_hotel_id": "cai-01"})]).patch():
@@ -572,7 +572,7 @@ class AiChatTest(_AgentApi):
         self.assertEqual(res["generated_by"], "unavailable")
         self.assertIn("AI assistant is unavailable", res["reply"])
         self.assertNotIn("adjusted", res["reply"].lower())
-        self.assertEqual((res["updated_itinerary_days"], res["tools_called"]), ([], []))
+        self.assertEqual(res["tools_called"], [])
 
     def test_api_errors_are_reported(self):
         with FakeGemini([error("QUOTA_EXHAUSTED")]).patch():

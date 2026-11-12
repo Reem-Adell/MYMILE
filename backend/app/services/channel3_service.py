@@ -43,6 +43,8 @@ DEFAULT_BASE_URL = "https://api.trychannel3.com"
 LEGACY_BASE_URLS = {"https://api.channel3.ai/v1", "https://api.channel3.ai"}
 SEARCH_PATH = "/v1/search"
 MAX_RESULTS_PER_QUERY = 10           # hard cap, whatever the configuration says
+DEFAULT_RESULTS_PER_QUERY = 5        # enough candidates for ~10 products over 6 searches
+MAX_QUERIES_PER_TRIP = 6             # hard cap on unique searches (= credits) per trip plan, follow-ups included
 MAX_QUERY_LENGTH = 120
 STALE_KEEP_SECONDS = 14 * 24 * 3600
 LOCALE = {"currency": "USD", "country": "US"}
@@ -85,11 +87,11 @@ def base_url() -> str:
 
 
 def results_per_query() -> int:
-    return max(1, min(int(settings.CHANNEL3_RESULTS_PER_QUERY or 4), MAX_RESULTS_PER_QUERY))
+    return max(1, min(int(settings.CHANNEL3_RESULTS_PER_QUERY or DEFAULT_RESULTS_PER_QUERY), MAX_RESULTS_PER_QUERY))
 
 
 def max_queries_per_trip() -> int:
-    return max(1, min(int(settings.CHANNEL3_MAX_QUERIES_PER_TRIP or 3), 5))
+    return max(1, min(int(settings.CHANNEL3_MAX_QUERIES_PER_TRIP or MAX_QUERIES_PER_TRIP), MAX_QUERIES_PER_TRIP))
 
 
 def clean_query(query: str) -> str:
@@ -328,15 +330,20 @@ def apply_purchase_link_policy(response: ProductSearchResponse, plan: str) -> Pr
 
 
 async def search_products_response(query: str, limit: Optional[int] = None,
-                                   plan: str = "free") -> ProductSearchResponse:
-    """A direct search (GET /api/products/search). Closed by default: no links unless plan == 'premium'."""
-    query = clean_query(query)
+                                   plan: str = "free", audience: Optional[str] = None) -> ProductSearchResponse:
+    """A direct search (GET /api/products/search). Closed by default: no links unless plan == 'premium'.
+    `audience` ("men"/"women") adds that word to clothing/footwear searches and drops products
+    stated for the other audience; nothing else is added to the user's query."""
+    from app.services import trip_shopping  # local import: trip_shopping is independent of this module
+
+    query = trip_shopping.audience_query(clean_query(query), audience)
+    other = trip_shopping.opposite_audience(audience)
     try:
         found = await search(query, limit)
     except Channel3Error as err:
         status = "not_configured" if err.code == "NOT_CONFIGURED" else "unavailable"
         return ProductSearchResponse(query_context=query, products=[], status=status, message=err.message)
-    items = [to_item(p) for p in found["products"]]
+    items = [to_item(p) for p in found["products"] if not (other and trip_shopping.infer_audience(p) == other)]
     response = ProductSearchResponse(query_context=query, products=items, status="ok" if items else "empty",
                                      message=None if items else "Channel3 found no products for this search.")
     return apply_purchase_link_policy(response, plan)

@@ -5,6 +5,7 @@ import 'ag-grid-community/styles/ag-grid.css';
 import 'ag-grid-community/styles/ag-theme-quartz.css';
 import { BudgetBreakdown } from '../types';
 import { formatMoney } from '../services/exploreView';
+import { budgetView } from '../services/budgetView';
 
 ModuleRegistry.registerModules([AllCommunityModule]);
 
@@ -112,6 +113,7 @@ export const AgGridBudgetTable: React.FC<AgGridBudgetTableProps> = ({ breakdown,
     : (targetBudget - total);
 
   const isPositive = remaining >= 0;
+  const view = budgetView(breakdown); // labels only; the grid and its numbers are unchanged
 
   // Target and remaining are shown only when the traveler set a budget (no fallback figures).
   const hasUserBudget = !!(userBudget || breakdown.user_budget);
@@ -121,17 +123,17 @@ export const AgGridBudgetTable: React.FC<AgGridBudgetTableProps> = ({ breakdown,
       <div className="mm-grid-toolbar mm-budget-summary">
         {hasUserBudget && (
           <div>
-            <small>Your budget</small>
+            <small>Total budget</small>
             <b>{formatMoney(targetBudget, currency)}</b>
           </div>
         )}
         <div>
-          <small>Estimated total</small>
+          <small>{view.totalLabel}</small>
           <b>{formatMoney(breakdown.total_estimated, currency)}</b>
         </div>
         {hasUserBudget && (
           <div>
-            <small>{isPositive ? 'Remaining' : 'Over budget'}</small>
+            <small title={view.note}>{view.unallocatedLabel}</small>
             <b className={isPositive ? 'good' : 'bad'}>{formatMoney(Math.abs(remaining), currency)}</b>
           </div>
         )}

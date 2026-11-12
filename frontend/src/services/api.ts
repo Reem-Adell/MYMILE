@@ -1,5 +1,5 @@
 import axios from 'axios';
-import { TripPlan, Product, Hotel, WeatherData, DestinationImage, HotelOffers, ChatTurn, TripChatResult } from '../types';
+import { TripPlan, Product, Hotel, WeatherData, DestinationImage, HotelOffers, ChatTurn, TripChatResult, ProductSearchResult } from '../types';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '/api';
 
@@ -117,9 +117,19 @@ export const api = {
     notes?: string;
     plan: 'free' | 'premium';
     total_budget?: number; // always US dollars
+    shopping_audience?: 'men' | 'women' | 'all';
   }): Promise<TripPlan> => {
-    // The Gemini agent may take up to AI_AGENT_DEADLINE_SECONDS (180 s) plus tool time.
+    // The AI agent may take up to AI_AGENT_DEADLINE_SECONDS (180 s) plus tool time.
     const res = await apiClient.post<TripPlan>('/trips/plan', payload, { timeout: 210000 });
+    return res.data;
+  },
+
+  // Direct Channel3 product search (GET /products/search). The backend decides retailer
+  // links from the account's verified plan; `audience` only refines clothing/footwear.
+  searchProducts: async (query: string, audience?: 'men' | 'women' | 'all' | null): Promise<ProductSearchResult> => {
+    const params: Record<string, string | number> = { query, limit: 6 };
+    if (audience === 'men' || audience === 'women') params.audience = audience;
+    const res = await apiClient.get<ProductSearchResult>('/products/search', { params });
     return res.data;
   },
 

@@ -29,7 +29,10 @@ class ProductItem(BaseModel):
     purchase_url: Optional[str] = None
     brand: Optional[str] = None
     retailer: Optional[str] = None
-    reason: Optional[str] = None         # Gemini's short recommendation reason
+    reason: Optional[str] = None         # the AI's short reason, only facts from the product data
+    group: Optional[str] = None          # trip-specific display category chosen by the AI, e.g. "Prayer Essentials"
+    audience: Optional[str] = None       # "all" | "men" | "women" (never assumed: labelled options)
+    per_traveler: Optional[bool] = None  # one needed per traveler (True) or shared (False); None = unknown
     in_stock: Optional[bool] = None      # None = unknown
     variants: List[str] = []             # e.g. "Size: S, M, L"
     offers: List[ProductOffer] = []

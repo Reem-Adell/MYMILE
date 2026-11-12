@@ -37,7 +37,8 @@ PREMIUM_DETAIL = "This feature requires an active MYMILE Premium pass."
 PRODUCT_QUERY = {"query": "packable rain jacket", "limit": 4}
 HOTEL_QUERY = {"destination": "Cairo", "check_in": "2026-12-01", "check_out": "2026-12-05", "nights": 4}
 TRIP_BODY = {"destination": "Cairo", "departure_date": "2026-12-01", "return_date": "2026-12-05",
-             "travelers": 2, "purpose": "Tourism", "total_budget": 3000}
+             "travelers": 2, "purpose": "Tourism", "total_budget": 3000,
+             "notes": "A relaxed sightseeing trip with museums and good food."}
 BUDGET_BODY = {"destination": "Cairo", "duration_days": 5, "travelers": 2, "total_budget": 3000}
 
 

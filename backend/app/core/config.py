@@ -57,8 +57,28 @@ class Settings(BaseSettings):
     ]
     
     # AI / LLM Configuration
-    # Supported providers: "gemini", "openai"
-    LLM_PROVIDER: str = Field(default="gemini", env="LLM_PROVIDER")
+    # Application log level (MYMILE's own loggers; Uvicorn's logs are unchanged).
+    LOG_LEVEL: str = Field(default="INFO", env="LOG_LEVEL")
+    # Supported providers: "groq" (default, primary) and "gemini" (optional, legacy).
+    # Chosen only by this setting: there is no automatic fallback between providers.
+    LLM_PROVIDER: str = Field(default="groq", env="LLM_PROVIDER")
+    # Groq (OpenAI-compatible API, used through the `openai` package)
+    GROQ_API_KEY: Optional[str] = Field(default=None, env="GROQ_API_KEY")
+    GROQ_MODEL: str = Field(default="openai/gpt-oss-120b", env="GROQ_MODEL")
+    GROQ_BASE_URL: str = Field(default="https://api.groq.com/openai/v1", env="GROQ_BASE_URL")
+    GROQ_TIMEOUT_SECONDS: float = Field(default=60.0, env="GROQ_TIMEOUT_SECONDS")
+    GROQ_REASONING_EFFORT: str = Field(default="low", env="GROQ_REASONING_EFFORT")
+    # Completion limits (reasoning tokens included). Tool-call rounds are short; the final
+    # JSON gets GROQ_FINAL_BASE_TOKENS, never more than GROQ_MAX_COMPLETION_TOKENS (also
+    # used for the one retry after a truncated answer).
+    GROQ_TOOL_ROUND_MAX_TOKENS: int = Field(default=1024, env="GROQ_TOOL_ROUND_MAX_TOKENS")
+    GROQ_FINAL_BASE_TOKENS: int = Field(default=3000, env="GROQ_FINAL_BASE_TOKENS")
+    GROQ_MAX_COMPLETION_TOKENS: int = Field(default=8192, env="GROQ_MAX_COMPLETION_TOKENS")
+    # 429s: retried at most this many times per request, waiting the provider's
+    # retry-after, only if that wait is <= GROQ_RETRY_MAX_WAIT_SECONDS and fits the agent deadline.
+    GROQ_RATE_LIMIT_RETRIES: int = Field(default=2, env="GROQ_RATE_LIMIT_RETRIES")
+    GROQ_RETRY_MAX_WAIT_SECONDS: float = Field(default=20.0, env="GROQ_RETRY_MAX_WAIT_SECONDS")
+    # Gemini (only used when LLM_PROVIDER=gemini)
     GEMINI_API_KEY: Optional[str] = Field(default=None, env="GEMINI_API_KEY")
     OPENAI_API_KEY: Optional[str] = Field(default=None, env="OPENAI_API_KEY")
     LLM_MODEL_NAME: str = Field(default="gemini-3.8-flash", env="LLM_MODEL_NAME")
@@ -75,11 +95,12 @@ class Settings(BaseSettings):
     CHANNEL3_API_KEY: Optional[str] = Field(default=None, env="CHANNEL3_API_KEY")
     CHANNEL3_BASE_URL: str = Field(default="https://api.trychannel3.com", env="CHANNEL3_BASE_URL")
     # Each Channel3 search costs 1 credit (1,000 free per month), so results are
-    # cached and every trip is limited to a few small searches.
+    # cached and every trip plan is capped at CHANNEL3_MAX_QUERIES_PER_TRIP unique searches (hard maximum 6,
+    # shared by the initial and follow-up searches).
     CHANNEL3_CACHE_TTL_HOURS: float = Field(default=24.0, env="CHANNEL3_CACHE_TTL_HOURS")
     CHANNEL3_TIMEOUT_SECONDS: float = Field(default=15.0, env="CHANNEL3_TIMEOUT_SECONDS")
-    CHANNEL3_MAX_QUERIES_PER_TRIP: int = Field(default=3, env="CHANNEL3_MAX_QUERIES_PER_TRIP")
-    CHANNEL3_RESULTS_PER_QUERY: int = Field(default=4, env="CHANNEL3_RESULTS_PER_QUERY")
+    CHANNEL3_MAX_QUERIES_PER_TRIP: int = Field(default=6, env="CHANNEL3_MAX_QUERIES_PER_TRIP")
+    CHANNEL3_RESULTS_PER_QUERY: int = Field(default=5, env="CHANNEL3_RESULTS_PER_QUERY")
     
     # Weather API (Default: Open-Meteo, 100% free and real without API key, or OpenWeatherMap)
     WEATHER_API_KEY: Optional[str] = Field(default=None, env="WEATHER_API_KEY")

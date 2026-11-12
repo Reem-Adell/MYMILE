@@ -43,8 +43,10 @@ os.environ["CHANNEL3_API_KEY"] = ""
 os.environ["WIKIMEDIA_CONTACT"] = ""
 os.environ["GEMINI_API_KEY"] = ""
 os.environ["OPENAI_API_KEY"] = ""
+os.environ["GROQ_API_KEY"] = ""
 os.environ["LLM_PROVIDER"] = "gemini"
 os.environ["LLM_MODEL_NAME"] = ""
+os.environ["LOG_LEVEL"] = "WARNING"  # keep test output quiet; logging tests set their own level
 
 
 class UnsafeTestDatabaseError(RuntimeError):

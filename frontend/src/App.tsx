@@ -6,13 +6,15 @@ import editorLoginImage from "./imports/editor-login-egypt.jpg";
 import signupImage from "./imports/download__2_.jpg";
 import { AgGridHotelComparison } from "./components/AgGridHotelComparison";
 import { AgGridBudgetTable } from "./components/AgGridBudgetTable";
-import { ShoppingCartDrawer } from "./components/ShoppingCartDrawer";
 import { PremiumCheckout } from "./components/PremiumCheckout";
 import { SessionExpiredError } from "./services/payments";
 import { api, getStoredToken, getStoredUser, getErrorMessage, updateStoredUser } from "./services/api";
-import { TripPlan, Hotel, HotelOffers, ItineraryDay, Product, CartItem, User, BudgetBreakdown, PremiumTerms, DestinationImage } from "./types";
+import { TripPlan, Hotel, HotelOffers, Product, User, BudgetBreakdown, PremiumTerms, DestinationImage } from "./types";
 import {
   TripRequest,
+  DESCRIPTION_MAX,
+  cleanDescription,
+  descriptionError,
   StoredTrips,
   accountKey,
   browserStore,
@@ -51,11 +53,21 @@ function EstimatedLabel() {
   );
 }
 import { BudgetImpact, applyHotelSelection } from "./services/hotelComparison";
-import { availabilityLabel, buyLink, essentialsEmptyMessage, productPrice, productSource } from "./services/productView";
+import { budgetView } from "./services/budgetView";
+import {
+  audienceLabel,
+  availabilityLabel,
+  essentialsEmptyMessage,
+  manualSearchQuery,
+  missingCategoriesNote,
+  productPrice,
+  productSource,
+  viewProductUrl,
+} from "./services/productView";
 import {
   DEFAULT_SUGGESTIONS,
   aiPlanLabel,
-  applyItineraryChanges,
+  aiProviderName,
   buildChatContext,
   recentHistory,
   suggestedHotel,
@@ -98,8 +110,7 @@ type View =
   | "profile"
   | "login"
   | "signup"
-  | "assistant"
-  | "shop";
+  | "assistant";
 
 type IconName =
   | "arrow"
@@ -417,7 +428,7 @@ function Header({
 const features = [
   ["spark", "AI trip planning", "A journey shaped around your pace, interests, and travel style."],
   ["hotel", "Stays that fit you", "Handpicked hotels with clear reasons why each one matches."],
-  ["cloud", "Weather-wise plans", "Daily forecasts shape your itinerary and packing list."],
+  ["cloud", "Weather-wise plans", "Daily forecasts shape your stay and packing list."],
   ["bag", "Travel essentials", "Smart product picks via Channel3 for your destination & season."],
   ["wallet", "Budget optimization", "See where every dollar goes and make confident trade-offs."],
   ["route", "One connected journey", "Interactive AG Grid dashboards to compare stays and budgets."],
@@ -446,7 +457,7 @@ function Home({
               <span>EVERY MILE.</span>
             </h1>
             <p>
-              Tell us how you want to travel. MYMILE finds the right stays, builds your itinerary, checks the weather, and helps every mile fit your budget.
+              Tell us how you want to travel. MYMILE finds the right stays, picks your travel essentials, checks the weather, and helps every mile fit your budget.
             </p>
             <div className="hero-actions">
               <button className="btn btn-primary" onClick={() => go("plan")}>
@@ -593,7 +604,7 @@ function Home({
                 [
                   "04",
                   "Enjoy every mile",
-                  "Travel with an itinerary and companion that are always there when you need them.",
+                  "Travel with a plan and companion that are always there when you need them.",
                 ],
               ].map(([n, t, d]) => (
                 <div className="step" key={n}>
@@ -701,7 +712,7 @@ function Planner({
 }) {
   const [step, setStep] = useState(1);
   // City and Country are separate, required fields: they are the authoritative
-  // location for hotels, weather and the itinerary.
+  // location for hotels and weather.
   const [city, setCity] = useState("");
   const [country, setCountry] = useState("");
   const step1Missing = !city.trim() || !country.trim();
@@ -714,8 +725,11 @@ function Planner({
   const [purpose, setPurpose] = useState("Tourism");
   const [travelers, setTravelers] = useState("2");
   const [stayPreference, setStayPreference] = useState("Boutique hotel");
-  const [priorities, setPriorities] = useState<string[]>(["Local culture", "Great food", "Slow pace"]);
   const [notes, setNotes] = useState("");
+  const notesError = descriptionError(notes);
+  const [notesTouched, setNotesTouched] = useState(false); // show the error after leaving the field
+  // "Who are you shopping for?" — optional; a shopping preference, not the traveler's identity.
+  const [shoppingAudience, setShoppingAudience] = useState<"all" | "men" | "women">("all");
   // Budget optimization is a Premium feature. For Free accounts it is always off
   // (whatever was chosen before), and clicking it opens the Pricing page instead.
   const isPremiumUser = userPlan === "premium";
@@ -732,15 +746,9 @@ function Planner({
 
   const titles = ["Where are you headed?", "Who’s coming along?", "Make it feel like you"];
 
-  const togglePriority = (tag: string) => {
-    if (priorities.includes(tag)) {
-      setPriorities(priorities.filter((p) => p !== tag));
-    } else {
-      setPriorities([...priorities, tag]);
-    }
-  };
 
   const handleFinish = async () => {
+    if (descriptionError(notes)) return; // required; the button is disabled too
     const c = city.trim();
     const k = country.trim();
     await onGeneratePlan({
@@ -752,8 +760,9 @@ function Planner({
       travelers: clampTravelers(travelers),
       purpose,
       stay_preference: stayPreference,
-      priorities,
-      notes: notes.trim(), // preferences only; never used as the destination
+      priorities: [], // "What matters most?" was removed; the trip description carries preferences
+      notes: cleanDescription(notes), // the trip description; never used as the destination
+      shopping_audience: shoppingAudience,
       total_budget: premiumOptim ? parseFloat(budgetVal.replace(/,/g, "")) || 4500 : undefined,
     });
     go("results"); // Explore shows loading / error / the new trip
@@ -906,45 +915,42 @@ function Planner({
           {step === 3 && (
             <div>
               <label className="field">
-                <span>What matters most?</span>
-              </label>
-              <div className="tag-options">
-                {[
-                  "Local culture",
-                  "Great food",
-                  "Nature",
-                  "Slow pace",
-                  "Hidden gems",
-                  "Family friendly",
-                  "Nightlife",
-                  "Beaches",
-                  "Work & Productivity",
-                ].map((x) => {
-                  const active = priorities.includes(x);
-                  return (
-                    <button
-                      type="button"
-                      className={active ? "selected" : ""}
-                      onClick={() => togglePriority(x)}
-                      key={x}
-                    >
-                      {x}
-                      <Icon name={active ? "check" : "heart"} size={15} />
-                    </button>
-                  );
-                })}
-              </div>
-
-              <label className="field spaced">
                 <span>
-                  Anything we should know? <em>Optional</em>
+                  Tell us about your trip <em className="required">*</em>
                 </span>
                 <textarea
                   value={notes}
-                  onChange={(e) => setNotes(e.target.value)}
-                  placeholder="Dietary needs, accessibility, must-see places, or anything else..."
+                  onChange={(e) => setNotes(e.target.value.slice(0, DESCRIPTION_MAX))}
+                  maxLength={DESCRIPTION_MAX}
+                  required
+                  aria-required="true"
+                  aria-describedby="trip-description-help"
+                  onBlur={() => setNotesTouched(true)}
+                  placeholder="e.g. A summer beach vacation with some city exploration, or a business trip with an important conference..."
                 />
+                <small id="trip-description-help" className={`char-count${notesTouched && notesError ? " bad" : ""}`}>
+                  {notesTouched && notesError ? notesError : "We use this to pick the right travel products."}
+                  <span>{notes.length}/{DESCRIPTION_MAX}</span>
+                </small>
               </label>
+
+              {/* Shopping preferences: only used to pick travel products. */}
+              <fieldset className="shopping-prefs">
+                <legend>Shopping preferences</legend>
+                <label className="field">
+                  <span>
+                    Who are you shopping for? <em>Optional</em>
+                  </span>
+                  <div className="input-wrap">
+                    <Icon name="bag" />
+                    <select value={shoppingAudience} onChange={(e) => setShoppingAudience(e.target.value as "all" | "men" | "women")}>
+                      <option value="all">Everyone / No preference</option>
+                      <option value="men">Men</option>
+                      <option value="women">Women</option>
+                    </select>
+                  </div>
+                </label>
+              </fieldset>
 
               {/* Premium Feature: Budget Constraint Optimization */}
               <label className="premium-switch">
@@ -1004,8 +1010,9 @@ function Planner({
                 last step. isLoading is also true while a saved trip re-plans in the background. */}
             <button
               className="btn btn-primary"
-              disabled={(step === 3 && isLoading) || (step === 1 && step1Missing)}
-              title={step === 1 && step1Missing ? "Enter a destination city and country" : undefined}
+              disabled={(step === 3 && (isLoading || !!notesError)) || (step === 1 && step1Missing)}
+              title={step === 1 && step1Missing ? "Enter a destination city and country"
+                : step === 3 && notesError ? notesError : undefined}
               onClick={() => (step < 3 ? setStep(step + 1) : handleFinish())}
             >
               {step < 3 ? (
@@ -1107,7 +1114,7 @@ function ExploreEmpty({ go }: { go: (v: View) => void }) {
         <span className="kicker">EXPLORE</span>
         <h1>Your next journey starts with a plan.</h1>
         <p>
-          Tell MYMILE where you're headed and when. Your stay, day-by-day itinerary, weather and
+          Tell MYMILE where you're headed and when. Your stay, travel essentials, weather and
           essentials will appear here for that trip.
         </p>
         <button className="btn btn-yellow" onClick={() => go("plan")}>
@@ -1136,7 +1143,7 @@ function ExploreStatus({
           <>
             <span className="ex-spinner" aria-hidden="true" />
             <h1>Preparing your trip…</h1>
-            <p>Checking the weather, stays and itinerary for your destination.</p>
+            <p>Checking the weather, stays and travel essentials for your destination.</p>
           </>
         ) : (
           <>
@@ -1194,7 +1201,7 @@ function BudgetImpactSummary({ impact }: { impact: BudgetImpact }) {
           <span>Budget unchanged: no listed price for this hotel.</span>
         ) : impact.remaining != null ? (
           <span className={impact.remaining < 0 ? "over" : undefined}>
-            {impact.remaining < 0 ? "Over budget by " : "Remaining "}
+            {impact.remaining < 0 ? "Over-allocated by " : "Unallocated "}
             {formatMoney(Math.abs(impact.remaining), cur)}
           </span>
         ) : null}
@@ -1206,7 +1213,6 @@ function BudgetImpactSummary({ impact }: { impact: BudgetImpact }) {
 function Results({
   plan,
   go,
-  onAddToCart,
   userPlan,
   onSelectHotel,
   selectedHotel,
@@ -1214,15 +1220,12 @@ function Results({
 }: {
   plan: TripPlan;
   go: (v: View) => void;
-  onAddToCart: (p: Product) => void;
   userPlan: "free" | "premium";
   onSelectHotel: (h: Hotel) => void;
   selectedHotel: Hotel | null;
   budgetImpact: BudgetImpact | null;
 }) {
-  const [openDays, setOpenDays] = useState<number[]>([1]);
   const [showAgGrid, setShowAgGrid] = useState<boolean>(true);
-  const [added, setAdded] = useState<string | null>(null);
 
   const baseHotel = selectedHotel || plan.recommended_hotel;
   // Premium = backend says Premium now (GET /auth/me, expiry-aware) AND this plan
@@ -1251,7 +1254,6 @@ function Results({
   const showBudget = canShowBudget(userPlan, plan);
   const budget = showBudget ? plan.budget_breakdown : null;
   const nights = plan.total_days;
-  const allOpen = openDays.length === plan.itinerary.length;
   // Must match GUESTS_PER_ROOM in the backend hotel service.
   const rooms = Math.max(1, Math.ceil(plan.travelers / 2));
   const price = priceView(activeHotel, nights, rooms);
@@ -1262,9 +1264,11 @@ function Results({
     : [];
   const partsTotal = budgetParts.reduce((s, p) => s + p.value, 0) || 1;
   const userBudget = budget?.user_budget || null;
-  const usedPct = budget && userBudget ? Math.min(100, Math.round((budget.total_estimated / userBudget) * 100)) : null;
-  const remaining = budget ? budget.remaining_balance ?? (userBudget ? userBudget - budget.total_estimated : null) : null;
-  const overBudget = remaining !== null && remaining < 0;
+  // Same backend numbers, clearer terms (allocated vs estimated, unallocated vs over-allocated).
+  const bView = budget ? budgetView(budget) : null;
+  const usedPct = bView ? bView.allocatedPct : null;
+  const remaining = bView ? bView.unallocated : null;
+  const overBudget = bView?.state === "over";
 
   // Hero: a real, verified photo of THIS destination (backend: Wikipedia /
   // Wikimedia Commons, cached), else a branded fallback. Never a random image.
@@ -1273,17 +1277,9 @@ function Results({
   // The bundled hero photo shows Cairo/Giza: a valid fallback for Cairo only.
   const cairoPhoto = /^(cairo|giza)$/i.test(heroCity) ? editorHeroImage : null;
 
-  const toggleDay = (n: number) =>
-    setOpenDays((prev) => (prev.includes(n) ? prev.filter((d) => d !== n) : [...prev, n]));
-
   const scrollTo = (id: string) =>
     document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
 
-  const handleAdd = (p: Product) => {
-    onAddToCart(p);
-    setAdded(p.id);
-    window.setTimeout(() => setAdded((cur) => (cur === p.id ? null : cur)), 1600);
-  };
 
   return (
     <main className="app-bg explore">
@@ -1335,7 +1331,6 @@ function Results({
         {[
           ["ex-overview", "Overview"],
           ["ex-stay", "Stay"],
-          ["ex-itinerary", "Itinerary"],
           ["ex-essentials", "Essentials"],
         ].map(([id, label]) => (
           <button key={id} onClick={() => scrollTo(id)}>
@@ -1368,11 +1363,9 @@ function Results({
                     <Icon name="wallet" />
                   </span>
                   <div>
-                    <small>Estimated cost</small>
+                    <small>{bView!.totalLabel}</small>
                     <b>{formatMoney(budget.total_estimated, budget.currency)}</b>
-                    <em className={overBudget ? "bad" : "good"}>
-                      {overBudget ? "Over budget" : budget.status.replace(/_/g, " ")}
-                    </em>
+                    <em className={overBudget ? "bad" : "good"}>{bView!.statusLabel}</em>
                   </div>
                 </div>
               )}
@@ -1561,77 +1554,6 @@ function Results({
             )}
           </section>
 
-          {/* ---------- Itinerary ---------- */}
-          <section id="ex-itinerary" className="ex-section">
-            <div className="ex-heading">
-              <div>
-                <span className="kicker">DAY BY DAY</span>
-                <h2>
-                  Your {plan.destination.split(",")[0]} <span>story.</span>
-                </h2>
-              </div>
-              <div className="ex-heading-actions">
-                <button
-                  className="ex-link muted"
-                  onClick={() => setOpenDays(allOpen ? [] : plan.itinerary.map((d) => d.day_number))}
-                >
-                  {allOpen ? "Collapse all" : "Expand all"}
-                </button>
-                <button className="ex-link" onClick={() => go("assistant")}>
-                  Refine with AI <Icon name="spark" size={15} />
-                </button>
-              </div>
-            </div>
-
-            <div className="ex-days">
-              {plan.itinerary.map((d) => {
-                const isOpen = openDays.includes(d.day_number);
-                return (
-                  <article key={d.day_number} className={`ex-card ex-day${isOpen ? " open" : ""}`}>
-                    <button
-                      className="ex-day-head"
-                      onClick={() => toggleDay(d.day_number)}
-                      aria-expanded={isOpen}
-                    >
-                      <span className="ex-day-num">
-                        <small>DAY</small>
-                        <b>{String(d.day_number).padStart(2, "0")}</b>
-                      </span>
-                      <span className="ex-day-title">
-                        <small>{d.date_str}</small>
-                        <b>{d.theme}</b>
-                      </span>
-                      <span className="ex-day-count">
-                        {d.activities.length} stop{d.activities.length === 1 ? "" : "s"}
-                      </span>
-                      <span className="ex-day-chevron">
-                        <Icon name="chevron" size={18} />
-                      </span>
-                    </button>
-                    {isOpen && (
-                      <ol className="ex-timeline">
-                        {d.activities.map((act, idx) => (
-                          <li key={idx}>
-                            <time>{act.time}</time>
-                            <div>
-                              <b>{act.title}</b>
-                              <p>{act.description}</p>
-                              {act.location && (
-                                <span>
-                                  <Icon name="pin" size={13} /> {act.location}
-                                </span>
-                              )}
-                            </div>
-                          </li>
-                        ))}
-                      </ol>
-                    )}
-                  </article>
-                );
-              })}
-            </div>
-          </section>
-
           {/* ---------- Essentials ---------- */}
           <section id="ex-essentials" className="ex-section">
             <div className="ex-heading">
@@ -1641,45 +1563,21 @@ function Results({
                   Travel <span>essentials.</span>
                 </h2>
               </div>
-              {plan.travel_essentials.length > 3 && (
-                <button className="ex-link" onClick={() => go("shop")}>
-                  View all {plan.travel_essentials.length} <Icon name="arrow" size={15} />
-                </button>
-              )}
             </div>
             {plan.travel_essentials.length === 0 && (
               <p className="ex-products-empty">{essentialsEmptyMessage(plan.essentials)}</p>
             )}
+            {plan.travel_essentials.length > 0 && missingCategoriesNote(plan.essentials) && (
+              <p className="ex-products-empty">{missingCategoriesNote(plan.essentials)}</p>
+            )}
             <div className="ex-products">
-              {plan.travel_essentials.slice(0, 3).map((prod) => (
-                <article key={prod.id} className="ex-card ex-product">
-                  <ProductImage product={prod} />
-                  <div>
-                    {productSource(prod) && <span className="ex-product-cat">{productSource(prod)}</span>}
-                    <h4>{prod.name}</h4>
-                    {prod.reason && <p>{prod.reason}</p>}
-                  </div>
-                  <div className="ex-product-foot">
-                    <b>
-                      {productPrice(prod)}
-                      {availabilityLabel(prod) && <small className="ex-product-stock">{availabilityLabel(prod)}</small>}
-                    </b>
-                    <button
-                      className={`btn btn-yellow btn-small${added === prod.id ? " done" : ""}`}
-                      onClick={() => handleAdd(prod)}
-                    >
-                      {added === prod.id ? (
-                        <>
-                          <Icon name="check" size={15} /> Added
-                        </>
-                      ) : (
-                        <>+ Add to cart</>
-                      )}
-                    </button>
-                  </div>
-                </article>
+              {plan.travel_essentials.map((prod) => (
+                <ProductCard key={prod.id} product={prod} isPremium={isPremium} onUpgrade={() => go("pricing")} />
               ))}
             </div>
+
+            {/* key: a new trip starts with an empty search (nothing carried over from the last trip) */}
+            <ProductSearch key={plan.trip_id} audience={plan.shopping_audience} isPremium={isPremium} onUpgrade={() => go("pricing")} />
           </section>
         </div>
 
@@ -1689,16 +1587,14 @@ function Results({
           <div className="ex-card ex-budget">
             <div className="ex-budget-head">
               <h3>Budget snapshot</h3>
-              <span className={overBudget ? "bad" : "good"}>
-                {overBudget ? "Over budget" : "Optimized"}
-              </span>
+              <span className={overBudget ? "bad" : "good"}>{bView!.statusLabel}</span>
             </div>
             <div className="ex-budget-total">
-              <small>Estimated total</small>
+              <small>{bView!.totalLabel}</small>
               <b>{formatMoney(budget.total_estimated, budget.currency)}</b>
-              {userBudget && (
+              {userBudget && usedPct !== null && (
                 <span>
-                  of {money(userBudget)} budget · {usedPct}% used
+                  of {money(userBudget)} total budget · {usedPct}% allocated
                 </span>
               )}
             </div>
@@ -1721,12 +1617,19 @@ function Results({
                 </li>
               ))}
             </ul>
+            {bView!.mode === "allocated" && (
+              <ul className="ex-legend">
+                <li><span>Hotel cost</span><b>{money(bView!.hotel)}</b></li>
+                <li><span>Category allocations</span><b>{money(bView!.categories)}</b></li>
+              </ul>
+            )}
             {remaining !== null && (
               <div className={`ex-remaining${overBudget ? " bad" : ""}`}>
-                <span>{overBudget ? "Over by" : "Remaining"}</span>
+                <span>{bView!.unallocatedLabel}</span>
                 <b>{money(Math.abs(remaining))}</b>
               </div>
             )}
+            <p className="ex-premium-note">{bView!.note}</p>
             <p className="ex-premium-note">
               <Icon name="check" size={15} /> Premium budget optimizer active
             </p>
@@ -1744,16 +1647,6 @@ function Results({
             </button>
           </div>
 
-          <button className="ex-card ex-shop" onClick={() => go("shop")}>
-            <span className="icon-box yellow">
-              <Icon name="bag" />
-            </span>
-            <span>
-              <b>Ready for {plan.destination.split(",")[0]}?</b>
-              <small>{plan.travel_essentials.length} essentials picked for this trip</small>
-            </span>
-            <Icon name="chevron" size={18} />
-          </button>
         </aside>
       </div>
     </main>
@@ -1764,10 +1657,8 @@ type ChatEntry = {
   role: 'user' | 'assistant';
   text: string;
   local?: boolean;  // UI note, not sent to the AI as history
-  generatedBy?: 'gemini' | 'unavailable';
+  generatedBy?: 'groq' | 'gemini' | 'unavailable';
   tools?: string[];
-  changes?: ItineraryDay[];
-  applied?: boolean;
   hotelOptions?: Hotel[];
   suggestedHotelId?: string | null;
 };
@@ -1775,12 +1666,10 @@ type ChatEntry = {
 function Assistant({
   trip,
   userPlan,
-  onApplyDays,
   onSelectHotel,
 }: {
   trip: TripPlan | null;
   userPlan: 'free' | 'premium';
-  onApplyDays: (days: ItineraryDay[]) => void;
   onSelectHotel: (hotel: Hotel) => void;
 }) {
   const [messages, setMessages] = useState<ChatEntry[]>([
@@ -1788,8 +1677,8 @@ function Assistant({
       role: 'assistant',
       local: true,
       text: trip
-        ? `Ask me to change a day, find a cheaper hotel, or suggest activities for your ${trip.destination} trip.`
-        : `Plan a trip first, then I can adjust its itinerary and hotels. You can still ask general travel questions.`,
+        ? `Ask me to find a cheaper hotel, check the weather, or what to pack for your ${trip.destination} trip.`
+        : `Plan a trip first, then I can help with its hotels and packing. You can still ask general travel questions.`,
     },
   ]);
   const [text, setText] = useState("");
@@ -1817,7 +1706,6 @@ function Assistant({
         text: res.reply,
         generatedBy: res.generated_by,
         tools: res.tools_called,
-        changes: res.updated_itinerary_days,
         hotelOptions: res.hotel_options,
         suggestedHotelId: res.suggested_hotel_id,
       }]);
@@ -1833,13 +1721,6 @@ function Assistant({
     } finally {
       setIsThinking(false);
     }
-  };
-
-  const applyChanges = (index: number) => {
-    const entry = messages[index];
-    if (!entry?.changes?.length || entry.applied) return;
-    onApplyDays(entry.changes);
-    setMessages((prev) => prev.map((m, i) => (i === index ? { ...m, applied: true } : m)));
   };
 
   return (
@@ -1858,7 +1739,7 @@ function Assistant({
             </div>
           </div>
           <span className="text-xs bg-blue-100 text-blue-800 font-bold px-2.5 py-1 rounded-full">
-            {lastAi?.generatedBy === 'gemini' ? "Gemini AI" : lastAi ? "AI unavailable" : "AI assistant"}
+            {aiProviderName(lastAi?.generatedBy) ? `${aiProviderName(lastAi?.generatedBy)} AI` : lastAi ? "AI unavailable" : "AI assistant"}
           </span>
         </div>
 
@@ -1874,9 +1755,9 @@ function Assistant({
                 )}
                 <div>
                   <p>{m.text}</p>
-                  {m.generatedBy === 'gemini' && (
+                  {aiProviderName(m.generatedBy) && (
                     <small className="chat-meta">
-                      Gemini{m.tools?.length ? ` · used ${toolList(m.tools)}` : ""}
+                      {aiProviderName(m.generatedBy)}{m.tools?.length ? ` · used ${toolList(m.tools)}` : ""}
                     </small>
                   )}
                   {suggested && trip && (
@@ -1890,19 +1771,6 @@ function Assistant({
                       </small>
                       <button className="btn btn-secondary" onClick={() => onSelectHotel(suggested)}>
                         Use this hotel
-                      </button>
-                    </div>
-                  )}
-                  {m.changes && m.changes.length > 0 && trip && (
-                    <div className="chat-card">
-                      <b>Proposed changes: day {m.changes.map((d) => d.day_number).join(", ")}</b>
-                      {m.changes.map((d) => (
-                        <small key={d.day_number}>
-                          Day {d.day_number} · {d.theme}: {d.activities.map((a) => a.title).join(" → ")}
-                        </small>
-                      ))}
-                      <button className="btn btn-secondary" onClick={() => applyChanges(i)} disabled={m.applied}>
-                        {m.applied ? "Applied to your plan" : "Apply to my plan"}
                       </button>
                     </div>
                   )}
@@ -1940,7 +1808,7 @@ function Assistant({
             value={text}
             onChange={(e) => setText(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && send()}
-            placeholder="Ask anything about your itinerary, hotels, or packing..."
+            placeholder="Ask anything about your trip, hotels, or packing..."
           />
           <button onClick={() => send()} aria-label="Send" disabled={isThinking}>
             <Icon name="send" />
@@ -1964,121 +1832,106 @@ function ProductImage({ product, className }: { product: Product; className?: st
   return <img src={product.image_url} alt={product.name} className={className} onError={() => setFailed(true)} />;
 }
 
-function Shop({
-  products,
-  essentials,
-  hasTrip,
-  onAddToCart,
-  cartCount,
-  onOpenCart,
-  onUpgrade,
-}: {
-  products: Product[];
-  essentials?: TripPlan["essentials"];
-  hasTrip: boolean;
-  onAddToCart: (p: Product) => void;
-  cartCount: number;
-  onOpenCart: () => void;
+// One product card: real Channel3 data and a "View Product" button that opens the
+// retailer's own URL. The backend sends that URL only to Premium accounts; without a
+// valid URL the button is disabled (never a made-up or broken link).
+function ProductCard({ product: prod, isPremium, onUpgrade }: { product: Product; isPremium: boolean; onUpgrade: () => void }) {
+  const url = viewProductUrl(prod);
+  return (
+    <article className="ex-card ex-product">
+      <ProductImage product={prod} />
+      <div>
+        {(prod.group || productSource(prod)) && (
+          <span className="ex-product-cat">
+            {[prod.group, audienceLabel(prod)].filter(Boolean).join(" · ") || productSource(prod)}
+          </span>
+        )}
+        <h4>{prod.name}</h4>
+        {prod.brand && <small className="ex-product-brand">{prod.brand}</small>}
+        {prod.reason && <p>{prod.reason}</p>}
+      </div>
+      <div className="ex-product-foot">
+        <b>
+          {productPrice(prod)}
+          {availabilityLabel(prod) && <small className="ex-product-stock">{availabilityLabel(prod)}</small>}
+        </b>
+        {url ? (
+          <a className="btn btn-yellow btn-small" href={url} target="_blank" rel="noopener noreferrer">
+            View Product
+          </a>
+        ) : (
+          <button className="btn btn-yellow btn-small" disabled
+                  title={isPremium ? "No retailer link was provided for this product" : "Retailer links are included with Premium"}>
+            View Product
+          </button>
+        )}
+      </div>
+      {!url && !isPremium && (
+        <button className="ex-product-buy" onClick={onUpgrade}>Retailer links with Premium ✦</button>
+      )}
+    </article>
+  );
+}
+
+// Manual product search inside Travel Essentials: the exact words the user types go to
+// GET /api/products/search (a direct, cached Channel3 search; no AI call).
+function ProductSearch({ audience, isPremium, onUpgrade }: {
+  audience?: "men" | "women" | "all" | null;
+  isPremium: boolean;
   onUpgrade: () => void;
 }) {
+  const [input, setInput] = useState("");
+  const [state, setState] = useState<{
+    loading: boolean; lastQuery: string | null; failed: boolean; products: Product[]; message: string | null;
+  }>({ loading: false, lastQuery: null, failed: false, products: [], message: null });
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const query = manualSearchQuery(input, state);
+    if (!query) return;
+    setState((s) => ({ ...s, loading: true, message: null }));
+    try {
+      const res = await api.searchProducts(query, audience);
+      const message = res.products.length ? null
+        : res.status === "empty" ? `No products found for "${query}".`
+          : res.message || "Product search isn't available right now.";
+      setState({ loading: false, lastQuery: query, failed: res.status !== "ok" && res.status !== "empty",
+                 products: res.products, message });
+    } catch (err) {
+      setState({ loading: false, lastQuery: query, failed: true, products: [],
+                 message: `The search failed: ${getErrorMessage(err)}` });
+    }
+  };
+
   return (
-    <main className="app-bg simple-page wide">
-      <div className="page-intro left">
-        <div className="flex items-center gap-2 mb-2">
-          <span className="kicker">TRAVEL ESSENTIALS · CHANNEL3</span>
-        </div>
-        <h1>Destination Travel Essentials.</h1>
-        <p>
-          Real products found by Channel3 for your trip. Prices and availability come from each retailer and may
-          change.
-        </p>
-      </div>
-
-      <div className="shop-toolbar flex items-center justify-between p-4 bg-white rounded-2xl border border-slate-200 mb-6 shadow-sm">
-        <span className="text-xs font-bold text-gray-700">
-          {products.length ? `${products.length} products for your trip` : "No products yet"}
-        </span>
-        <button
-          onClick={onOpenCart}
-          className="btn btn-primary btn-small flex items-center gap-2"
-        >
-          <Icon name="bag" size={17} /> View Cart ({cartCount})
+    <div className="ex-search" aria-live="polite">
+      <form className="ex-search-form" onSubmit={submit} role="search">
+        <input
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          placeholder="What product are you looking for?"
+          maxLength={120}
+          aria-label="Search for a product"
+        />
+        <button className="btn btn-primary btn-small" type="submit" disabled={state.loading || !input.trim()}>
+          {state.loading ? "Searching…" : "Search"}
         </button>
-      </div>
-
-      {products.length === 0 && (
-        <p className="ex-products-empty">
-          {hasTrip ? essentialsEmptyMessage(essentials) : "Plan a trip to see product suggestions for it."}
-        </p>
+      </form>
+      {state.lastQuery && !state.loading && (
+        <div className="ex-search-results">
+          <span className="kicker">YOUR SEARCH · CHANNEL3</span>
+          <h3>Results for "{state.lastQuery}"</h3>
+          {state.message && <p className="ex-products-empty">{state.message}</p>}
+          {state.products.length > 0 && (
+            <div className="ex-products">
+              {state.products.map((prod) => (
+                <ProductCard key={prod.id} product={prod} isPremium={isPremium} onUpgrade={onUpgrade} />
+              ))}
+            </div>
+          )}
+        </div>
       )}
-
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-        {products.map((prod) => (
-          <article className="product-card flex flex-col justify-between h-full bg-white rounded-2xl border border-slate-200 shadow-sm p-4 hover:shadow-md transition-shadow" key={prod.id}>
-            <div>
-              <ProductImage product={prod} className="w-full h-48 object-cover rounded-xl mb-4" />
-              <div className="flex items-center justify-between gap-2 mb-1">
-                <small className="text-[10px] font-bold text-blue-600 uppercase tracking-wider">
-                  {prod.category || productSource(prod)}
-                </small>
-                {prod.rating != null && (
-                  <span className="text-xs text-yellow-500 font-bold"
-                        title={prod.rating_count ? `${prod.rating_count.toLocaleString()} ratings` : undefined}>
-                    ★ {prod.rating}
-                  </span>
-                )}
-              </div>
-              <h3 className="text-base font-bold text-gray-900 leading-snug">{prod.name}</h3>
-              {productSource(prod) && <p className="text-xs text-gray-500 mt-1">{productSource(prod)}</p>}
-              {prod.reason ? (
-                <p className="text-xs text-gray-600 mt-2 leading-relaxed">{prod.reason}</p>
-              ) : prod.description ? (
-                <p className="text-xs text-gray-600 mt-2 leading-relaxed line-clamp-3">{prod.description}</p>
-              ) : null}
-            </div>
-
-            <div className="pt-4 mt-4 border-t border-slate-100">
-              <div className="flex items-center justify-between mb-3">
-                <b className="text-lg font-black text-gray-900">
-                  {productPrice(prod)}
-                  {availabilityLabel(prod) && (
-                    <small className="block text-[11px] font-semibold text-gray-500">{availabilityLabel(prod)}</small>
-                  )}
-                </b>
-                <button
-                  onClick={() => onAddToCart(prod)}
-                  className="btn btn-yellow btn-small"
-                >
-                  Add to cart
-                </button>
-              </div>
-              <div className="flex items-center justify-between text-[11px] text-gray-400">
-                <span>Found by Channel3</span>
-                {/* The backend sends purchase_url only when the account may use it. */}
-                {buyLink(prod) ? (
-                  <a
-                    href={buyLink(prod)!.href}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="text-blue-600 font-semibold hover:underline"
-                  >
-                    {buyLink(prod)!.label} ↗
-                  </a>
-                ) : (
-                  <button
-                    onClick={onUpgrade}
-                    className="text-blue-600 font-semibold hover:underline"
-                    title="Retailer links are included with Premium"
-                  >
-                    Retailer link with Premium ✦
-                  </button>
-                )}
-              </div>
-            </div>
-          </article>
-        ))}
-      </div>
-    </main>
+    </div>
   );
 }
 
@@ -2128,7 +1981,6 @@ function Pricing({
             "Hotel recommendations & estimates",
             "Live meteorological weather insights",
             "Channel3 travel essentials discovery",
-            "Basic daily itinerary",
             "Estimated baseline trip costs",
           ].map((x) => (
             <div className="plan-feature" key={x}>
@@ -2558,7 +2410,7 @@ function Footer({ go }: { go: (v: View) => void }) {
           <img src={logo} alt="MYMILE" className="h-8 w-auto mb-3" />
           <p>Your intelligent travel companion for happier journeys, every mile.</p>
           <div className="mt-3 text-xs text-slate-400">
-            Powered by Channel3, AG Grid, Open-Meteo & Google Gemini
+            Powered by Channel3, AG Grid, Open-Meteo & Groq
           </div>
         </div>
         <div>
@@ -2566,7 +2418,6 @@ function Footer({ go }: { go: (v: View) => void }) {
           <button onClick={() => go("plan")}>Plan a trip</button>
           <button onClick={() => go("results")}>Dashboard</button>
           <button onClick={() => go("pricing")}>Pricing Plans</button>
-          <button onClick={() => go("shop")}>Travel Gear</button>
         </div>
         <div>
           <b>Developers</b>
@@ -2580,7 +2431,7 @@ function Footer({ go }: { go: (v: View) => void }) {
       </div>
       <div className="page-shell copyright">
         <span>© 2026 MYMILE. Your smile, with you every mile.</span>
-        <span>Channel3 · AG Grid · Google Gemini</span>
+        <span>Channel3 · AG Grid · Groq</span>
       </div>
     </footer>
   );
@@ -2655,9 +2506,6 @@ export default function App() {
   const [selectedHotel, setSelectedHotel] = useState<Hotel | null>(null);
   // Effect of the latest hotel switch on the Premium budget (shown under the comparison grid).
   const [budgetImpact, setBudgetImpact] = useState<BudgetImpact | null>(null);
-  const [cart, setCart] = useState<CartItem[]>([]);
-  const [isCartOpen, setIsCartOpen] = useState(false);
-
   // ---- Planned trips: the source of truth for Explore ----
   // Stored per account as the Plan a Trip REQUEST (see services/tripStore.ts). The
   // plan itself always comes from the server, which re-decides Premium content.
@@ -2753,39 +2601,6 @@ export default function App() {
     setBudgetImpact(result.impact);
   };
 
-  const handleAddToCart = (product: Product) => {
-    setCart((prev) => {
-      const existing = prev.find((item) => item.product.id === product.id);
-      if (existing) {
-        return prev.map((item) =>
-          item.product.id === product.id
-            ? { ...item, quantity: item.quantity + 1 }
-            : item
-        );
-      }
-      return [...prev, { product, quantity: 1 }];
-    });
-    setIsCartOpen(true);
-  };
-
-  const handleUpdateCartQuantity = (productId: string, delta: number) => {
-    setCart((prev) =>
-      prev
-        .map((item) => {
-          if (item.product.id === productId) {
-            const newQ = item.quantity + delta;
-            return newQ > 0 ? { ...item, quantity: newQ } : null;
-          }
-          return item;
-        })
-        .filter(Boolean) as CartItem[]
-    );
-  };
-
-  const handleRemoveCartItem = (productId: string) => {
-    setCart((prev) => prev.filter((item) => item.product.id !== productId));
-  };
-
   const go = (v: View) => {
     setView(v);
     window.scrollTo({ top: 0, behavior: "smooth" });
@@ -2802,16 +2617,6 @@ export default function App() {
     setAuthUser(null); // guest = Free
     go("home");
   };
-
-  const totalCartCount = cart.reduce((acc, i) => acc + i.quantity, 0);
-
-  // Cart items keep the product object from when they were added. Show the
-  // purchase link from the LATEST server response for this account instead, so
-  // links appear after an upgrade and disappear after logout.
-  const cartView: CartItem[] = cart.map((item) => {
-    const latest = currentTrip?.travel_essentials.find((p) => p.id === item.product.id);
-    return { ...item, product: latest ?? { ...item.product, purchase_url: null } };
-  });
 
   const content = useMemo(() => {
     if (view === "home") return (
@@ -2835,7 +2640,6 @@ export default function App() {
         <Results
           plan={currentTrip}
           go={go}
-          onAddToCart={handleAddToCart}
           userPlan={userPlan}
           onSelectHotel={handleSelectHotel}
           selectedHotel={selectedHotel}
@@ -2858,22 +2662,10 @@ export default function App() {
         <Assistant
           trip={currentTrip}
           userPlan={userPlan}
-          onApplyDays={(days) => setCurrentTrip((t) => (t ? applyItineraryChanges(t, days) : t))}
           onSelectHotel={handleSelectHotel}
         />
       );
     if (view === "trips") return <Trips go={go} trips={trips} onOpenTrip={handleOpenTrip} />;
-    if (view === "shop") return (
-      <Shop
-        products={currentTrip ? currentTrip.travel_essentials : []}
-        essentials={currentTrip?.essentials}
-        hasTrip={!!currentTrip}
-        onAddToCart={handleAddToCart}
-        cartCount={totalCartCount}
-        onOpenCart={() => setIsCartOpen(true)}
-        onUpgrade={() => go("pricing")}
-      />
-    );
     if (view === "profile") {
       // Guests have no profile: ask them to log in.
       return authUser ? <Profile user={authUser} go={go} /> : <Login go={go} onAuth={handleAuth} />;
@@ -2881,7 +2673,7 @@ export default function App() {
     if (view === "signup") return <Signup go={go} onAuth={handleAuth} />;
     return <Login go={go} onAuth={handleAuth} />;
   }, [view, currentTrip, selectedHotel, authUser, userPlan, isLoading, tripStatus, tripError, trips,
-      cart, premiumTerms, plansError,
+      premiumTerms, plansError,
       refreshUser, handleSessionExpired]);
 
   return (
@@ -2897,18 +2689,6 @@ export default function App() {
         <Footer go={go} />
       )}
 
-      {/* Slide-over Shopping Cart */}
-      <ShoppingCartDrawer
-        isOpen={isCartOpen}
-        onClose={() => setIsCartOpen(false)}
-        items={cartView}
-        onUpdateQuantity={handleUpdateCartQuantity}
-        onRemoveItem={handleRemoveCartItem}
-        onUpgrade={() => {
-          setIsCartOpen(false);
-          go("pricing");
-        }}
-      />
     </>
   );
 }

@@ -34,7 +34,8 @@ PREMIUM_DETAIL = "This feature requires an active MYMILE Premium pass."
 
 HOTEL_QUERY = {"destination": "Cairo", "check_in": "2026-12-01", "check_out": "2026-12-05", "nights": 4}
 TRIP_BODY = {"destination": "Cairo", "departure_date": "2026-12-01", "return_date": "2026-12-05",
-             "travelers": 2, "purpose": "Tourism", "total_budget": 3000}
+             "travelers": 2, "purpose": "Tourism", "total_budget": 3000,
+             "notes": "A relaxed sightseeing trip with museums and good food."}
 BUDGET_BODY = {"destination": "Cairo", "duration_days": 5, "travelers": 2, "total_budget": 3000}
 
 
@@ -243,7 +244,8 @@ class PlanEnforcementTest(unittest.TestCase):
         guest_trip = self.api.post("/api/trips/plan", json=TRIP_BODY)
         self.assertEqual(guest_trip.status_code, 200, guest_trip.text)
         body = guest_trip.json()
-        self.assertTrue(body["itinerary"] and body["all_hotels"])
+        self.assertTrue(body["all_hotels"])
+        self.assertNotIn("itinerary", body)
         self.assertIsNone(body["budget_breakdown"], "guests (Free) get no budget data")
         chat = self.api.post("/api/trips/chat", json={"message": "What should I pack?"})
         self.assertEqual(chat.status_code, 200, chat.text)

@@ -13,7 +13,7 @@ router = APIRouter(prefix="/trips", tags=["Trips & AI Agent"])
 async def create_trip_plan(req: TripPlanRequest, plan: str = Depends(get_effective_plan)):
     """
     Core AI Travel Agent endpoint.
-    Retrieves weather, finds verified stays, generates itinerary, estimates/optimizes expenses,
+    Retrieves weather, finds verified stays, recommends products, estimates/optimizes expenses,
     and returns Channel3 travel essentials.
     """
     try:

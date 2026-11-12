@@ -1,8 +1,9 @@
 """
-Google Gemini access through the official `google-genai` SDK.
+Google Gemini access through the official `google-genai` SDK. Optional, legacy
+provider: used only when LLM_PROVIDER=gemini (Groq is the default, see llm.py).
 
 Configuration (backend/.env, read via app.core.config.settings):
-    LLM_PROVIDER=gemini           only "gemini" is implemented
+    LLM_PROVIDER=gemini           opt in to Gemini instead of Groq
     GEMINI_API_KEY=...            required for any AI feature
     LLM_MODEL_NAME=...            default gemini-3.8-flash; retired 1.x names are replaced
     GEMINI_TIMEOUT_SECONDS=90     per Gemini request (also sent to Google as its server deadline)
@@ -17,6 +18,7 @@ from typing import Any, List, Optional
 
 import httpx
 
+from app.agents.llm_errors import LLMError
 from app.core.config import settings
 
 log = logging.getLogger(__name__)
@@ -42,13 +44,10 @@ ERROR_MESSAGES = {
 THINKING_LEVELS = ("low", "medium", "high")
 
 
-class GeminiError(Exception):
+class GeminiError(LLMError):
     """A Gemini failure with a fixed, key-free message."""
 
-    def __init__(self, code: str):
-        self.code = code
-        self.message = ERROR_MESSAGES.get(code, ERROR_MESSAGES["SERVICE_ERROR"])
-        super().__init__(f"{code}: {self.message}")
+    MESSAGES = ERROR_MESSAGES
 
 
 def api_key() -> str:

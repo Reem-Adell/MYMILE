@@ -1,5 +1,5 @@
 // Pure helpers for the AI assistant and AI labels (unit-tested with node:test).
-import type { AgentInfo, ChatTurn, Hotel, ItineraryDay, TripPlan } from '../types';
+import type { AgentInfo, ChatTurn, Hotel, TripPlan } from '../types';
 
 export const HISTORY_LIMIT = 8;
 
@@ -27,13 +27,6 @@ export function buildChatContext(trip: TripPlan, canSeeBudget: boolean): Record<
     recommended_hotel: hotel && !hotel.is_placeholder
       ? { id: hotel.id, name: hotel.name, price_per_night: hotel.price_per_night, total_price: hotel.total_price }
       : null,
-    itinerary: trip.itinerary.map((d) => ({
-      day_number: d.day_number,
-      theme: d.theme,
-      activities: d.activities.slice(0, 10).map((a) => ({
-        time: a.time, title: a.title, location: a.location ?? null, cost_estimate: a.cost_estimate,
-      })),
-    })),
   };
 }
 
@@ -43,13 +36,6 @@ export function recentHistory(messages: { role: 'user' | 'assistant'; text: stri
   return messages.filter((m) => !m.local && m.text.trim())
     .slice(-limit)
     .map((m) => ({ role: m.role, content: m.text }));
-}
-
-/** The trip with the given days replaced (matched by day_number). Unknown days are ignored. */
-export function applyItineraryChanges(trip: TripPlan, days: ItineraryDay[]): TripPlan {
-  if (!days.length) return trip;
-  const byNumber = new Map(days.map((d) => [d.day_number, d]));
-  return { ...trip, itinerary: trip.itinerary.map((d) => byNumber.get(d.day_number) ?? d) };
 }
 
 /** The hotel the assistant suggested, only if it is one of the returned options. */
@@ -68,14 +54,22 @@ export function toolList(tools: string[]): string {
   return tools.map((t) => TOOL_LABELS[t] || t).join(', ');
 }
 
-/** Banner text for how the itinerary was produced. */
-export function aiPlanLabel(ai?: AgentInfo | null): { kind: 'gemini' | 'template'; text: string } {
-  if (ai?.generated_by === 'gemini') {
+const PROVIDER_NAMES: Record<string, string> = { groq: 'Groq', gemini: 'Gemini' };
+
+/** Display name of the AI provider that produced a result, or null when no AI was used. */
+export function aiProviderName(generatedBy?: string | null): string | null {
+  return (generatedBy && PROVIDER_NAMES[generatedBy]) || null;
+}
+
+/** Banner text for how the plan was produced. */
+export function aiPlanLabel(ai?: AgentInfo | null): { kind: 'ai' | 'template'; text: string } {
+  const provider = aiProviderName(ai?.generated_by);
+  if (ai && provider) {
     const tools = ai.tools_used.length ? ` using live ${toolList(ai.tools_used)} data` : '';
-    return { kind: 'gemini', text: `Itinerary planned by Gemini${ai.model ? ` (${ai.model})` : ''}${tools}.` };
+    return { kind: 'ai', text: `Trip plan by ${provider}${ai.model ? ` (${ai.model})` : ''}${tools}.` };
   }
   return {
     kind: 'template',
-    text: `AI planning is unavailable, so this is a basic template itinerary.${ai?.notice ? ` ${ai.notice}` : ''}`,
+    text: `AI planning is unavailable, so this is a basic template plan.${ai?.notice ? ` ${ai.notice}` : ''}`,
   };
 }

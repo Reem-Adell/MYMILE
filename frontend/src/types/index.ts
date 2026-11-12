@@ -142,7 +142,10 @@ export interface Product {
   purchase_url: string | null;
   brand?: string | null;
   retailer?: string | null;
-  reason?: string | null;           // Gemini's short recommendation reason
+  reason?: string | null;           // the AI's short reason (facts from the product data only)
+  group?: string | null;            // trip-specific category, e.g. "Prayer Essentials"
+  audience?: 'all' | 'men' | 'women' | null; // labelled options; gender is never assumed
+  per_traveler?: boolean | null;    // one per traveler (true) or shared (false)
   in_stock?: boolean | null;        // null = unknown
   variants?: string[];
   offers?: ProductOffer[];
@@ -150,10 +153,24 @@ export interface Product {
   provider: string;
 }
 
+// "Who are you shopping for?" (a shopping preference, not the traveler's identity).
+export type ShoppingAudience = 'men' | 'women' | 'all';
+
+// GET /api/products/search (direct Channel3 search).
+export interface ProductSearchResult {
+  query_context: string;
+  products: Product[];
+  status: 'ok' | 'empty' | 'not_configured' | 'unavailable';
+  message?: string | null;
+}
+
 export interface EssentialsInfo {
   status: 'ok' | 'empty' | 'not_configured' | 'ai_unavailable' | 'unavailable';
   message?: string | null;
   queries: string[];
+  missing?: string[];                // needed categories with no product shown
+  // Why each is missing: not searched, searched but nothing relevant, or relevant but not selected.
+  missing_detail?: { category: string; state: 'not_searched' | 'not_found' | 'not_selected' }[];
 }
 
 export interface BudgetCategoryDetail {
@@ -176,22 +193,12 @@ export interface BudgetBreakdown {
   remaining_balance?: number | null;
   currency: string;
   status: string;
-}
-
-export interface ItineraryActivity {
-  time: string;
-  title: string;
-  description: string;
-  location?: string;
-  icon?: string;
-  cost_estimate: number;
-}
-
-export interface ItineraryDay {
-  day_number: number;
-  date_str: string;
-  theme: string;
-  activities: ItineraryActivity[];
+  // Clear terms (same numbers): 'allocated' = budget split into planned limits; 'estimated' = no budget set.
+  allocation_mode?: 'allocated' | 'estimated' | null;
+  allocated_total?: number | null;      // stay + category allocations
+  unallocated_budget?: number | null;   // budget - allocated (negative = over-allocated)
+  fully_allocated?: boolean | null;
+  allocation_note?: string | null;
 }
 
 export interface TripPlan {
@@ -205,6 +212,7 @@ export interface TripPlan {
   travelers: number;
   purpose: string;
   stay_preference: string;
+  shopping_audience?: ShoppingAudience | null; // echoed: "men" | "women" | null (everyone)
   plan_tier: 'free' | 'premium';
   match_score?: number | null;  // no fabricated score is sent
   destination_summary: string;
@@ -212,7 +220,6 @@ export interface TripPlan {
   weather: WeatherData;
   recommended_hotel: Hotel;
   all_hotels: Hotel[];
-  itinerary: ItineraryDay[];
   // Premium only: null for Free accounts and guests.
   budget_breakdown: BudgetBreakdown | null;
   travel_essentials: Product[];
@@ -221,9 +228,12 @@ export interface TripPlan {
   essentials?: EssentialsInfo;
 }
 
-// Who produced the itinerary and explanations (never claims AI when it wasn't used).
+// The backend's LLM provider (LLM_PROVIDER): Groq by default, Gemini optional.
+export type AiProvider = 'groq' | 'gemini';
+
+// Who produced the plan's text and picks (never claims AI when it wasn't used).
 export interface AgentInfo {
-  generated_by: 'gemini' | 'rules';
+  generated_by: AiProvider | 'rules';
   model?: string | null;
   tools_used: string[];
   cached: boolean;
@@ -240,17 +250,12 @@ export interface TripChatResult {
   reply: string;
   suggestions: string[];
   tools_called: string[];
-  generated_by: 'gemini' | 'unavailable';
+  generated_by: AiProvider | 'unavailable';
   model?: string | null;
-  updated_itinerary_days: ItineraryDay[];
   hotel_options: Hotel[];
   suggested_hotel_id?: string | null;
 }
 
-export interface CartItem {
-  product: Product;
-  quantity: number;
-}
 
 // GET /api/places/destination-image
 export interface DestinationImage {

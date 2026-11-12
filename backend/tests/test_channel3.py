@@ -239,18 +239,20 @@ class ProductToolTest(_C3Case):
         with mock.patch.object(settings, "CHANNEL3_API_KEY", ""):
             self.assertNotIn("find_travel_products", self.names(AgentToolbox(ctx(), "free", allow_products=True)))
 
-    def test_queries_are_limited_deduplicated_and_tool_runs_once(self):
-        fake = self.serve(FakeChannel3(ok(product("p1")), ok(product("p2")), ok(product("p3"))))
+    def test_queries_are_limited_deduplicated_and_capped_per_trip(self):
+        fake = self.serve(FakeChannel3(ok(product("p1")), ok(product("p2", "Walking Shoes")),
+                                       ok(product("p3", "Universal Travel Adapter"))))
         box = AgentToolbox(ctx(), "free", allow_products=True)
         result = run(box.execute("find_travel_products", {"queries": [
             "rain jacket", "Rain  Jacket", "walking shoes", "travel adapter", "extra query", "x"]}))
         self.assertEqual(box.product_queries, ["rain jacket", "walking shoes", "travel adapter"])
         self.assertEqual(len(fake.requests), 3)
-        self.assertEqual({p["id"] for p in result["products"]}, {"p1", "p2", "p3"})
+        self.assertEqual({p["id"] for s in result["searches"] for p in s["products"]}, {"p1", "p2", "p3"})
         sent = json.dumps(result)
         self.assertNotIn("http", sent, "no URLs or images are sent to the model")
+        self.assertEqual(result["searches_left"], 0)
         again = run(box.execute("find_travel_products", {"queries": ["sunglasses"]}))
-        self.assertIn("limit", again["error"])
+        self.assertIn("limit", again["message"], "the per-trip search cap is shared by every call")
         self.assertEqual(len(fake.requests), 3)
 
     def test_fatal_errors_stop_further_searches(self):
@@ -258,7 +260,7 @@ class ProductToolTest(_C3Case):
         box = AgentToolbox(ctx(), "free", allow_products=True)
         result = run(box.execute("find_travel_products", {"queries": ["a jacket", "b shoes", "c adapter"]}))
         self.assertEqual(len(fake.requests), 1)
-        self.assertEqual(result["products"], [])
+        self.assertEqual(result["searches"][0]["products"], [])
         self.assertIn("credits", result["message"])
 
 

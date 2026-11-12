@@ -6,6 +6,17 @@ from app.schemas.budget_schema import (
     BudgetOptimizationResponse
 )
 
+def allocation_note(unallocated: float, currency: str = "USD") -> str:
+    """What the allocation means, without implying actual spending."""
+    if unallocated == 0:
+        return ("Your whole budget is allocated across your stay and categories. These are planned "
+                "limits, not a forecast of what you will spend.")
+    if unallocated > 0:
+        return f"{currency} {unallocated:,.2f} of your budget is not allocated to any category."
+    return (f"Your stay plus the minimum category amounts exceed your budget by {currency} "
+            f"{abs(unallocated):,.2f}.")
+
+
 def optimize_budget(
     destination: str,
     duration_days: int,
@@ -48,7 +59,9 @@ def optimize_budget(
             user_budget=total_budget,
             remaining_balance=None,
             currency=currency,
-            status="estimated"
+            status="estimated",
+            allocation_mode="estimated",
+            allocation_note="Estimated costs for this trip (no budget was set).",
         )
         return BudgetOptimizationResponse(
             plan_tier="free",
@@ -150,7 +163,12 @@ def optimize_budget(
         user_budget=budget,
         remaining_balance=remaining,
         currency=currency,
-        status=status
+        status=status,
+        allocation_mode="allocated",
+        allocated_total=total_est,
+        unallocated_budget=remaining,
+        fully_allocated=remaining == 0,
+        allocation_note=allocation_note(remaining, currency),
     )
     
     return BudgetOptimizationResponse(

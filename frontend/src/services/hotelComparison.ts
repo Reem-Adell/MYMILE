@@ -63,6 +63,11 @@ export function recalculateBudget(budget: BudgetBreakdown, hotelTotal: number): 
     total_estimated: newTotal,
     remaining_balance: newRemaining,
     status: newRemaining >= 0 ? 'balanced' : 'over_budget',
+    // The clearer terms follow the same numbers (the backend note no longer applies).
+    allocated_total: newTotal,
+    unallocated_budget: newRemaining,
+    fully_allocated: Math.abs(newRemaining) < 0.005,
+    allocation_note: null,
   };
 }
 

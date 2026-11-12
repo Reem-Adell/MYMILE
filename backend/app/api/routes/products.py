@@ -1,3 +1,5 @@
+from typing import Optional
+
 from fastapi import APIRouter, Depends, Query
 from app.api.routes.auth import get_effective_plan
 from app.schemas.product_schema import ProductSearchResponse
@@ -11,6 +13,8 @@ async def search_products(
     query: str = Query(..., min_length=2, max_length=channel3_service.MAX_QUERY_LENGTH,
                        description="Product search, e.g. 'packable rain jacket'"),
     limit: int = Query(4, ge=1, le=channel3_service.MAX_RESULTS_PER_QUERY, description="Number of products"),
+    audience: Optional[str] = Query(None, pattern="^(men|women|all)$",
+                                    description="Shopping audience for clothing/footwear searches"),
     # Server-verified from the Bearer token (guests -> 'free'). A `plan` query
     # parameter sent by the client is ignored.
     plan: str = Depends(get_effective_plan),
@@ -20,4 +24,4 @@ async def search_products(
     Everyone sees product details; the retailer `purchase_url` and offer URLs are
     Premium only (null for guests and Free users), decided server-side.
     """
-    return await channel3_service.search_products_response(query, limit, plan=plan)
+    return await channel3_service.search_products_response(query, limit, plan=plan, audience=audience)

@@ -17,7 +17,6 @@ PLANS_INFO = {
             "Hotel recommendations & estimated rates",
             "Real-time weather insights",
             "Travel essentials discovery",
-            "Basic daily itinerary",
             "Baseline estimated trip costs"
         ],
         "restrictions": [

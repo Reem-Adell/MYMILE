@@ -20,7 +20,8 @@ from app.core.config import settings
 from app.services import destination_image, hotel_pricing, hotel_service
 
 TRIP = {"destination": "Cairo, Egypt", "departure_date": "2026-12-01", "return_date": "2026-12-04",
-        "travelers": 2, "purpose": "Tourism", "stay_preference": "Boutique hotel"}
+        "travelers": 2, "purpose": "Tourism", "stay_preference": "Boutique hotel",
+        "notes": "A relaxed sightseeing trip with museums and good food."}
 
 
 def run(coro):

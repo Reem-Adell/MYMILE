@@ -21,8 +21,10 @@ export interface TripRequest {
   purpose: string;
   stay_preference: string;
   priorities: string[];
-  notes: string;
+  notes: string;                // "Tell us about your trip" (required, <= 500 characters)
   total_budget?: number;        // USD; only used by the backend for Premium
+  // Who the products are for. Absent in trips saved before this field existed (= everyone).
+  shopping_audience?: 'men' | 'women' | 'all';
 }
 
 export interface StoredTrips {
@@ -33,6 +35,21 @@ export interface StoredTrips {
 export type KeyValueStore = Pick<Storage, 'getItem' | 'setItem'>;
 
 export const MAX_TRIPS = 5;
+// "Tell us about your trip": required, at most 500 characters (the backend checks the same).
+export const DESCRIPTION_MAX = 500;
+
+/** The trip description as it will be sent: trimmed, whitespace collapsed. */
+export function cleanDescription(raw: string): string {
+  return String(raw ?? '').replace(/\s+/g, ' ').trim();
+}
+
+/** Why the description can't be used yet, or null when it is fine. */
+export function descriptionError(raw: string): string | null {
+  const text = cleanDescription(raw);
+  if (!text) return 'Tell us about your trip so we can recommend the right products.';
+  if (text.length > DESCRIPTION_MAX) return `Please keep it to ${DESCRIPTION_MAX} characters.`;
+  return null;
+}
 const EMPTY: StoredTrips = { activeId: null, trips: [] };
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -55,8 +72,9 @@ export function isValidTripRequest(x: unknown): x is TripRequest {
     && typeof t.travelers === 'number' && Number.isInteger(t.travelers) && t.travelers >= 1
     && nonEmpty(t.purpose) && nonEmpty(t.stay_preference)
     && Array.isArray(t.priorities) && t.priorities.every((p) => typeof p === 'string')
-    && typeof t.notes === 'string'
+    && typeof t.notes === 'string' && descriptionError(t.notes) === null
     && (t.total_budget === undefined || (typeof t.total_budget === 'number' && t.total_budget > 0))
+    && (t.shopping_audience === undefined || ['men', 'women', 'all'].includes(t.shopping_audience as string))
   );
 }
 
@@ -117,6 +135,7 @@ export function toPlanPayload(trip: TripRequest, userPlan: 'free' | 'premium') {
     notes: trip.notes,
     plan: userPlan,
     total_budget: trip.total_budget,
+    shopping_audience: trip.shopping_audience,
   };
 }
 

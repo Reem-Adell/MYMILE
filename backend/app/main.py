@@ -1,7 +1,8 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.agents import gemini_client
+from app.agents import llm
 from app.core.config import settings
+from app.core.logging_config import configure_logging
 from app.core.paypal_client import is_paypal_configured
 from app.api.routes import (
     auth,
@@ -14,6 +15,10 @@ from app.api.routes import (
     subscriptions,
     payments
 )
+
+# MYMILE's own INFO logs (e.g. Groq token usage) were dropped: Uvicorn configures only its
+# own loggers. One handler on the "app" logger, with secret redaction.
+configure_logging(settings.LOG_LEVEL)
 
 app = FastAPI(
     title=settings.PROJECT_NAME,
@@ -86,7 +91,7 @@ async def health_check():
             "weather": "Open-Meteo Real-Time Weather API (Live)",
             "hotels": "MYMILE Verified Accommodations Provider (Live)",
             # What this process will actually use (no key material).
-            "llm": gemini_client.describe()
+            "llm": llm.describe()
         },
         # What THIS running process loaded (no ids, no secrets). If it says
         # false after editing backend/.env, the server was not restarted.

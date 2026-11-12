@@ -33,7 +33,7 @@ function trip(over: Partial<TripPlan> = {}): TripPlan {
     trip_id: 't1', destination: 'Cairo, Egypt', departure_date: '2026-12-01', return_date: '2026-12-04',
     total_days: 3, travelers: 2, purpose: 'Tourism', stay_preference: 'Boutique hotel', plan_tier: 'premium',
     destination_summary: 's', why_recommended: 'w', weather: {} as TripPlan['weather'], recommended_hotel: rec,
-    all_hotels: [rec, hotel('b', { total_price: 600 }), hotel('c', { total_price: 1200 })], itinerary: [],
+    all_hotels: [rec, hotel('b', { total_price: 600 }), hotel('c', { total_price: 1200 })],
     budget_breakdown: BUDGET, travel_essentials: [], is_premium: true, ...over,
   };
 }
@@ -101,7 +101,8 @@ test('the existing budget formula is unchanged', () => {
   const next = recalculateBudget(BUDGET, 600);
   // accommodation = hotel total; other categories kept: 150+360+240+80+70 = 900
   assert.deepEqual(next, { ...BUDGET, accommodation: 600, total_estimated: 1500, remaining_balance: 500,
-    status: 'balanced' });
+    status: 'balanced', allocated_total: 1500, unallocated_budget: 500, fully_allocated: false,
+    allocation_note: null });
   const over = recalculateBudget(BUDGET, 1300);
   assert.equal(over.remaining_balance, -200);
   assert.equal(over.status, 'over_budget');

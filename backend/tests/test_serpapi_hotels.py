@@ -28,7 +28,7 @@ CHECK_IN = (date.today() + timedelta(days=30)).isoformat()
 CHECK_OUT = (date.today() + timedelta(days=33)).isoformat()
 TRIP = {"destination": "Lisbon, Portugal", "destination_city": "Lisbon", "destination_country": "Portugal",
         "departure_date": CHECK_IN, "return_date": CHECK_OUT, "travelers": 2, "purpose": "Tourism",
-        "stay_preference": "Boutique hotel"}
+        "stay_preference": "Boutique hotel", "notes": "A relaxed city break with museums."}
 
 
 def rate(nightly, total=None, before=None):

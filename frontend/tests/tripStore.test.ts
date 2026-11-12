@@ -6,6 +6,9 @@ import {
   accountKey,
   getActiveTrip,
   isValidTripRequest,
+  cleanDescription,
+  descriptionError,
+  DESCRIPTION_MAX,
   loadTrips,
   saveTrip,
   setActiveTrip,
@@ -84,7 +87,8 @@ test('corrupt or tampered storage is ignored safely', () => {
 
 test('invalid trips are never saved', () => {
   for (const bad of [trip('a', { destination_city: ' ' }), trip('a', { destination_country: '' }),
-    trip('a', { departure_date: '12/01/2026' }), trip('a', { travelers: 0 }), trip('a', { total_budget: -5 })]) {
+    trip('a', { departure_date: '12/01/2026' }), trip('a', { travelers: 0 }), trip('a', { total_budget: -5 }),
+    trip('a', { shopping_audience: 'kids' as never })]) {
     assert.equal(isValidTripRequest(bad), false);
   }
   const store = memoryStore();
@@ -92,12 +96,32 @@ test('invalid trips are never saved', () => {
   assert.equal(loadTrips(store, 'g').trips.length, 0);
 });
 
-test('re-planning sends EVERY field (notes, priorities, city, country, budget)', () => {
-  const p = toPlanPayload(trip('a', { total_budget: 1500 }), 'premium');
+test('re-planning sends EVERY field (notes, priorities, city, country, budget, shopping audience)', () => {
+  const p = toPlanPayload(trip('a', { total_budget: 1500, shopping_audience: 'women' }), 'premium');
   assert.deepEqual(p, {
     destination: 'Cairo, Egypt', destination_city: 'Cairo', destination_country: 'Egypt',
     departure_date: '2026-12-01', return_date: '2026-12-04', travelers: 2, purpose: 'Tourism',
     stay_preference: 'Boutique hotel', priorities: ['Local culture'], notes: 'near the museums',
-    plan: 'premium', total_budget: 1500,
+    plan: 'premium', total_budget: 1500, shopping_audience: 'women',
   });
+});
+
+test('trips saved before the shopping audience existed still load and re-plan as "everyone"', () => {
+  const old = trip('old');
+  assert.equal(isValidTripRequest(old), true);
+  const p = toPlanPayload(old, 'free');
+  assert.equal(p.shopping_audience, undefined, 'absent field: not sent, backend treats it as everyone');
+  for (const who of ['men', 'women', 'all'] as const) assert.equal(isValidTripRequest(trip('a', { shopping_audience: who })), true);
+});
+
+test('the trip description is required, trimmed and at most 500 characters', () => {
+  assert.equal(DESCRIPTION_MAX, 500);
+  assert.equal(cleanDescription('  A beach   holiday \n'), 'A beach holiday');
+  assert.match(descriptionError('   ')!, /Tell us about your trip/);
+  assert.match(descriptionError('x'.repeat(501))!, /500 characters/);
+  assert.equal(descriptionError('x'.repeat(500)), null);
+  assert.equal(descriptionError('A beach holiday'), null);
+  assert.equal(isValidTripRequest(trip('a', { notes: '' })), false, 'saved trips need a description');
+  assert.equal(isValidTripRequest(trip('a', { notes: 'y'.repeat(501) })), false);
+  assert.equal(isValidTripRequest(trip('a', { notes: 'A beach holiday' })), true);
 });
